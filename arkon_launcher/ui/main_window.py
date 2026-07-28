@@ -46,12 +46,14 @@ from .. import (
     paths,
     players,
     provision,
+    updater,
     worlds,
 )
 from ..runner import ServerConfig, ServerProcess, ServerState, sanitize_jvm_args
 from ..settings import AppSettings, WorldSettings
 from .. import luckperms, permissionnodes, serversettings
 from ..serversettings import PendingChanges
+from .config_editor import ConfigEditor
 from .console_view import ConsoleView
 from .countdown_button import CountdownButton
 from .extra_panel import ExtraPanel, describe_hours, describe_restart_lead
@@ -140,6 +142,113 @@ class MainWindow(QMainWindow):
         self._scan_timer.timeout.connect(self._harvest_scan)
 
         QTimer.singleShot(0, self.discover_instances)
+        # Give the window a moment to appear before touching the network.
+        QTimer.singleShot(4000, self.check_for_update)
+
+    # --- Updates ---
+
+    def check_for_update(self, announce_when_current: bool = False) -> None:
+        """See whether a newer release exists. Never downloads on its own."""
+        if not self.settings.check_for_updates and not announce_when_current:
+            return
+
+        def work(report):
+            return updater.fetch_latest()
+
+        def done(release):
+            if release is None:
+                if announce_when_current:
+                    self.console.append_notice(
+                        "Could not reach GitHub to check for updates.", "#ffa94d"
+                    )
+                return
+            if not updater.is_newer(release.version):
+                if announce_when_current:
+                    self.console.append_notice(
+                        f"Arkon Launcher {__version__} is the newest version."
+                    )
+                return
+            self._offer_update(release)
+
+        self._run(work, done)
+
+    def _offer_update(self, release) -> None:
+        notes = release.notes.strip()
+        if len(notes) > 600:
+            notes = notes[:600] + "..."
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Update available")
+        box.setText(
+            f"Arkon Launcher {release.version} is available. You have {__version__}."
+        )
+        if notes:
+            box.setDetailedText(notes)
+
+        if not release.has_installer:
+            box.setInformativeText(
+                "That release has no installer attached, so it has to be downloaded "
+                "by hand from the releases page."
+            )
+            box.setStandardButtons(QMessageBox.Open | QMessageBox.Cancel)
+            if box.exec() == QMessageBox.Open:
+                QDesktopServices.openUrl(QUrl(release.url))
+            return
+
+        if paths.is_portable():
+            box.setInformativeText(
+                "This is a portable copy, so the installer will not update it in "
+                "place. Download it and unpack over this folder yourself - your "
+                "data folder is left alone."
+            )
+            box.setStandardButtons(QMessageBox.Open | QMessageBox.Cancel)
+            if box.exec() == QMessageBox.Open:
+                QDesktopServices.openUrl(QUrl(release.url))
+            return
+
+        box.setInformativeText(
+            f"Download and install it now?\n\n"
+            f"  {release.asset_name}\n"
+            f"  {release.asset_size / 1024**2:.0f} MB\n\n"
+            f"The server should be stopped first - the installer will close the "
+            f"launcher to replace it."
+        )
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        if box.exec() != QMessageBox.Yes:
+            return
+
+        if self.server and self.server.is_alive:
+            answer = QMessageBox.question(
+                self,
+                "Server is running",
+                "The server is still running. Updating will close the launcher, "
+                "and the installer may stop the server with it.\n\nContinue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        def work(report):
+            return updater.download_installer(release, report)
+
+        def done(installer):
+            answer = QMessageBox.question(
+                self,
+                "Run the installer?",
+                f"Downloaded to:\n{installer}\n\nRun it now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                try:
+                    updater.run_installer(installer)
+                except updater.UpdateError as exc:
+                    QMessageBox.warning(self, "Update", str(exc))
+
+        self._run(work, done)
 
     # --- Layout ---
 
@@ -294,6 +403,9 @@ class MainWindow(QMainWindow):
         self.extra_panel.restart_countdown_changed.connect(self._on_restart_countdown_changed)
         self.extra_panel.load_settings(self.settings)
 
+        self.config_editor = ConfigEditor()
+        self.config_editor.save_requested.connect(self._save_config_file)
+
         self.settings_panel = ServerSettingsPanel()
         self.settings_panel.save_requested.connect(self.save_settings)
         self.settings_panel.save_and_restart_requested.connect(self.save_and_restart)
@@ -346,6 +458,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.settings_panel, "Settings")
         self.tabs.addTab(self.players_panel, "Players")
         self.tabs.addTab(self.permissions_panel, "Permissions")
+        self.tabs.addTab(self.config_editor, "Config files")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -1780,6 +1893,42 @@ class MainWindow(QMainWindow):
             f"You may notice a brief pause."
         )
 
+    # --- Config file editing ---
+
+    def _save_config_file(self, path, text: str, reload_after: bool) -> None:
+        """Write the instance's config file, then re-mirror it to the server.
+
+        The instance copy is authoritative - the server's config folder is
+        rebuilt from it on every start - so that is what gets written. The
+        mirrored copy is refreshed too, otherwise a running server would keep
+        using the old contents until the next restart.
+        """
+        path = Path(path)
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save", str(exc))
+            return
+
+        self.config_editor.mark_saved()
+        self.console.append_notice(f"Saved {path.name}.")
+
+        server_dir = self._server_dir()
+        if server_dir and self.instance:
+            try:
+                relative = path.relative_to(self.instance.config_dir)
+                modsync._mirror_file(path, server_dir / "config" / relative)
+            except (ValueError, OSError):
+                pass
+
+        if reload_after and self.server and self.server.is_alive:
+            self.console.append_notice(
+                "Running /reload. Datapacks and functions are re-read; most mod "
+                "configs only load at startup and need a restart.",
+                "#ffa94d",
+            )
+            self._send_command("reload")
+
     # --- Join broadcast and scheduled restarts ---
 
     def _on_join_broadcast_changed(self, enabled: bool, message: str) -> None:
@@ -1968,6 +2117,8 @@ class MainWindow(QMainWindow):
             self.refresh_settings()
         elif widget is self.permissions_panel:
             self.refresh_permissions()
+        elif widget is self.config_editor and self.instance:
+            self.config_editor.set_root(self.instance.config_dir)
         elif widget is self.connection_panel and not self.connection.status.lan_addresses:
             self.refresh_connection()
 

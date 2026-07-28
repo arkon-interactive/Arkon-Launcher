@@ -48,6 +48,9 @@ class AppSettings:
     # permission nodes the pack actually checks. The lines are diverted from the
     # console so they never spam it.
     passive_permission_scan: bool = True
+    # Check GitHub for a newer release on startup. Nothing is downloaded or run
+    # without being asked first.
+    check_for_updates: bool = True
 
     # Scheduled backups, off unless asked for.
     backup_schedule_enabled: bool = False

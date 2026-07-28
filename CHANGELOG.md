@@ -11,10 +11,45 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
-## Unreleased
+## 0.6.0
 
-Working towards **0.5.0** — settings rework, whitelist editing, console
-improvements. See the roadmap at the bottom for what's still outstanding.
+- **Auto-update.** Checks GitHub releases on startup and offers a newer version.
+  Nothing downloads without a yes and nothing runs without a second yes; the
+  download is size-checked, portable copies are pointed at the releases page
+  instead of being replaced, and a running server prompts a warning first. See
+  `RELEASING.md`.
+- **Config file editor** — browse and edit the pack's config files, with an
+  optional `/reload` after saving. Edits go to the instance's config folder,
+  which is the source of truth; the server's copy is a mirror rebuilt on every
+  start, so writing there would be silently undone.
+- **Console player heads.** Online players appear as their real Minecraft
+  faces, fetched from Mojang's own session server — no third-party render
+  service — cached on disk, with a coloured initial as a fallback. Clicking one
+  appends the name to whatever you're typing.
+- **Command autocompletion** in the console, from the live command tree plus
+  online player names. Completes the word under the cursor, so commands complete
+  at the start and names complete anywhere after.
+- Backups moved into Settings, with the existing-backups list bottom-most.
+- New **Extra** settings page: a join greeting with a `{player}` placeholder,
+  and scheduled restarts with warnings in hours or days plus an optional spoken
+  countdown.
+
+## 0.5.0
+
+- All 60 game rules now carry a real explanation rather than their raw name.
+- Appearance moved above Gameplay; **server icon** picker added, scaling any
+  image to the 64x64 PNG Minecraft expects.
+- Players tab shows **Operator** ahead of World owner, since that's the fact
+  that actually grants power.
+- **Settings no longer autosave.** Edits are pending until you press Save, with
+  a Save and restart button when a change needs one, and Refresh replacing
+  Reload from disk.
+- **Drift detection**: `server.properties` edited outside the launcher is
+  noticed, and you're offered a refresh rather than having your edit silently
+  overwritten.
+- **Editable whitelist** that no longer requires a prior connection. Names are
+  resolved through the running server, or queued and applied on next start.
+  Shown only when the whitelist toggle is on.
 
 ## 0.4.1
 
@@ -93,12 +128,9 @@ First working version.
 
 ## Roadmap
 
-Outstanding, roughly in order:
+Nothing outstanding from the current round. Ideas worth considering:
 
-- [ ] Explicit Save button on settings, with drift detection against manual edits
-- [ ] Backups moved under Settings; Extra sub-tab for join broadcast and
-      scheduled restarts
-- [ ] Editable whitelist that doesn't require a prior connection
-- [ ] Server icon picker
-- [ ] Player avatars and command autocompletion in the console
-- [ ] Config file editor with reload on save
+- [ ] Sub-argument completion in the console (player names after `/tp`, item ids
+      after `/give`) rather than just command names
+- [ ] Restore a single world from a backup taken on another machine
+- [ ] Forge / NeoForge support

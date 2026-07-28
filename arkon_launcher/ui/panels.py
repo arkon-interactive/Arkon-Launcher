@@ -468,12 +468,14 @@ class BackupsPanel(QWidget):
             )
         )
 
+        # Settings first, the list of existing backups last: the settings are
+        # what you come here to change, the list is what you come here to read.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(group, 1)
         layout.addWidget(self.schedule_box)
         layout.addWidget(location_box)
         layout.addWidget(self.announcements)
+        layout.addWidget(group, 1)
 
         self._update_buttons()
 

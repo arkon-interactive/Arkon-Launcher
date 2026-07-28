@@ -53,6 +53,7 @@ from .. import luckperms, permissionnodes, serversettings
 from ..serversettings import PendingChanges
 from .console_view import ConsoleView
 from .countdown_button import CountdownButton
+from .extra_panel import ExtraPanel, describe_hours, describe_restart_lead
 from .panels import BackupsPanel, ConnectionPanel, PlayersPanel
 from .permissions_panel import PermissionsPanel
 from .settings_panel import ServerSettingsPanel
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
     server_line = Signal(str)
     server_state = Signal(object)
     players_changed = Signal()
+    player_joined = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -106,6 +108,7 @@ class MainWindow(QMainWindow):
         self.server_line.connect(self._on_server_line)
         self.server_state.connect(self._on_server_state)
         self.players_changed.connect(self._on_players_changed)
+        self.player_joined.connect(self._on_player_joined)
 
         self._uptime_timer = QTimer(self)
         self._uptime_timer.timeout.connect(self._refresh_status)
@@ -115,6 +118,11 @@ class MainWindow(QMainWindow):
         self._backup_timer.timeout.connect(self._scheduled_backup)
         self._announce_timers: list[QTimer] = []
         self._restart_backup_schedule()
+
+        self._restart_timer = QTimer(self)
+        self._restart_timer.timeout.connect(self._scheduled_restart)
+        self._restart_announce_timers: list[QTimer] = []
+        self._restart_restart_schedule()
 
         # What server.properties looked like when we last agreed with it, so an
         # edit made outside the launcher can be noticed rather than clobbered.
@@ -274,6 +282,15 @@ class MainWindow(QMainWindow):
         self.backups_panel.announcements_changed.connect(self._on_announcements_changed)
         self.backups_panel.load_settings(self.settings)
 
+        self.extra_panel = ExtraPanel()
+        self.extra_panel.join_broadcast_changed.connect(self._on_join_broadcast_changed)
+        self.extra_panel.restart_schedule_changed.connect(self._on_restart_schedule_changed)
+        self.extra_panel.restart_announcements_changed.connect(
+            self._on_restart_announcements_changed
+        )
+        self.extra_panel.restart_countdown_changed.connect(self._on_restart_countdown_changed)
+        self.extra_panel.load_settings(self.settings)
+
         self.settings_panel = ServerSettingsPanel()
         self.settings_panel.save_requested.connect(self.save_settings)
         self.settings_panel.save_and_restart_requested.connect(self.save_and_restart)
@@ -315,13 +332,17 @@ class MainWindow(QMainWindow):
         tracks_tab.append_group.connect(self._track_append)
         tracks_tab.remove_group.connect(self._track_remove)
 
+        # Backups and the extras are settings, so they sit inside Settings rather
+        # than competing with it at the top level.
+        self.settings_panel.add_sub_tab(self.backups_panel, "Backups")
+        self.settings_panel.add_sub_tab(self.extra_panel, "Extra")
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self.console, "Console")
         self.tabs.addTab(self.connection_panel, "Connection")
         self.tabs.addTab(self.settings_panel, "Settings")
         self.tabs.addTab(self.players_panel, "Players")
         self.tabs.addTab(self.permissions_panel, "Permissions")
-        self.tabs.addTab(self.backups_panel, "Backups")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -635,6 +656,7 @@ class MainWindow(QMainWindow):
         server.on_line(self.server_line.emit)
         server.on_state(self.server_state.emit)
         server.on_players(lambda _: self.players_changed.emit())
+        server.on_join(self.player_joined.emit)
         self.server = server
 
         try:
@@ -1705,6 +1727,96 @@ class MainWindow(QMainWindow):
             f'say Server backup in {describe_lead_time(seconds_before)}. '
             f"You may notice a brief pause."
         )
+
+    # --- Join broadcast and scheduled restarts ---
+
+    def _on_join_broadcast_changed(self, enabled: bool, message: str) -> None:
+        self.settings.join_broadcast_enabled = enabled
+        self.settings.join_broadcast_message = message
+        self.settings.save()
+
+    def _on_player_joined(self, name: str) -> None:
+        if not self.settings.join_broadcast_enabled:
+            return
+        message = self.settings.join_broadcast_message.replace("{player}", name)
+        if message.strip():
+            self._send_command(f"say {message}")
+
+    def _on_restart_schedule_changed(self, enabled: bool, hours: int) -> None:
+        self.settings.restart_schedule_enabled = enabled
+        self.settings.restart_interval_hours = hours
+        self.settings.save()
+        self._restart_restart_schedule()
+
+    def _on_restart_announcements_changed(self, enabled: bool, values: list) -> None:
+        self.settings.restart_announce_enabled = enabled
+        self.settings.restart_announcements = [int(v) for v in values]
+        self.settings.save()
+        self._restart_restart_schedule()
+
+    def _on_restart_countdown_changed(self, enabled: bool, seconds: int) -> None:
+        self.settings.restart_countdown_enabled = enabled
+        self.settings.restart_countdown_seconds = seconds
+        self.settings.save()
+
+    def _restart_restart_schedule(self) -> None:
+        """(Re)arm the periodic restart and its warnings."""
+        self._restart_timer.stop()
+        for timer in self._restart_announce_timers:
+            timer.stop()
+        self._restart_announce_timers.clear()
+
+        if not self.settings.restart_schedule_enabled:
+            self.extra_panel.set_next_run("Scheduled restarts are off.")
+            return
+
+        interval_ms = max(1, self.settings.restart_interval_hours) * 3600 * 1000
+        self._restart_timer.start(interval_ms)
+
+        if self.settings.restart_announce_enabled:
+            for seconds in self.settings.restart_announcements:
+                lead_ms = interval_ms - seconds * 1000
+                if lead_ms <= 0:
+                    continue  # A warning longer than the interval can never fire.
+                timer = QTimer(self)
+                timer.setInterval(interval_ms)
+                timer.timeout.connect(lambda s=seconds: self._announce_restart(s))
+                QTimer.singleShot(lead_ms, timer.start)
+                QTimer.singleShot(lead_ms, lambda s=seconds: self._announce_restart(s))
+                self._restart_announce_timers.append(timer)
+
+        self.extra_panel.set_next_run(
+            f"Next automatic restart in "
+            f"{describe_hours(self.settings.restart_interval_hours).lower().replace('every ', '')}."
+        )
+
+    def _announce_restart(self, seconds_before: int) -> None:
+        if not (self.server and self.server.is_alive):
+            return
+        self._send_command(
+            f"say Server restart in {describe_restart_lead(seconds_before)}."
+        )
+
+    def _scheduled_restart(self) -> None:
+        """Count down out loud, then restart."""
+        if not (self.server and self.server.is_alive):
+            return
+
+        if not self.settings.restart_countdown_enabled:
+            self.restart_server()
+            return
+
+        total = self.settings.restart_countdown_seconds
+        for remaining in range(total, 0, -1):
+            QTimer.singleShot(
+                (total - remaining) * 1000,
+                lambda r=remaining: self._countdown_tick(r),
+            )
+        QTimer.singleShot(total * 1000, self.restart_server)
+
+    def _countdown_tick(self, remaining: int) -> None:
+        if self.server and self.server.is_alive:
+            self._send_command(f"say Restarting in {remaining}...")
 
     def _scheduled_backup(self) -> None:
         if not (self.server and self.server.is_alive):

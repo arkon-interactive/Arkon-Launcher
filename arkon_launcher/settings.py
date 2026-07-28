@@ -57,6 +57,19 @@ class AppSettings:
     backup_announcements: list[int] = field(default_factory=lambda: [300, 60, 10])
     backup_announce_enabled: bool = True
 
+    # Message broadcast to everyone when somebody joins.
+    join_broadcast_enabled: bool = False
+    join_broadcast_message: str = "Welcome to the server, {player}!"
+
+    # Scheduled restarts. Announcements are in seconds internally, but entered
+    # in hours or days - a restart is a much bigger deal than a backup pause.
+    restart_schedule_enabled: bool = False
+    restart_interval_hours: int = 24
+    restart_announcements: list[int] = field(default_factory=lambda: [3600, 600, 60])
+    restart_announce_enabled: bool = True
+    restart_countdown_enabled: bool = True
+    restart_countdown_seconds: int = 10
+
     @classmethod
     def load(cls) -> "AppSettings":
         data = _load(paths.settings_path())

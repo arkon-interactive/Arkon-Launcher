@@ -145,6 +145,7 @@ class ServerProcess:
         self._line_listeners: list[LineCallback] = []
         self._state_listeners: list[StateCallback] = []
         self._player_listeners: list[Callable[[set[str]], None]] = []
+        self._join_listeners: list[Callable[[str], None]] = []
         # Console output is one undifferentiated stream, so two queries running at
         # once would each capture the other's replies. Serialise them.
         self._query_lock = threading.Lock()
@@ -170,10 +171,21 @@ class ServerProcess:
         """Called whenever someone joins or leaves, so the UI can keep up."""
         self._player_listeners.append(callback)
 
+    def on_join(self, callback: Callable[[str], None]) -> None:
+        """Called with the player's name each time somebody connects."""
+        self._join_listeners.append(callback)
+
     def _notify_players(self) -> None:
         for listener in list(self._player_listeners):
             try:
                 listener(set(self.players))
+            except Exception:
+                pass
+
+    def _notify_join(self, name: str) -> None:
+        for listener in list(self._join_listeners):
+            try:
+                listener(name)
             except Exception:
                 pass
 
@@ -272,6 +284,7 @@ class ServerProcess:
                 if name not in self.players:
                     self.players.add(name)
                     self._notify_players()
+                    self._notify_join(name)
                 break
 
         for pattern in (PLAYER_LOST_CONNECTION, PLAYER_LEFT):

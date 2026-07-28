@@ -331,6 +331,12 @@ class ServerSettingsPanel(QWidget):
         self._rules_layout = QVBoxLayout(self._rules_host)
         self.tabs.addTab(_scrollable(self._rules_host), "Game rules")
 
+        # Filled in by the main window - they are settings, so they live here
+        # rather than as top-level tabs.
+        self.backups_panel: QWidget | None = None
+        self.extra_panel: QWidget | None = None
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.status.setStyleSheet(HINT_STYLE)
@@ -546,6 +552,29 @@ class ServerSettingsPanel(QWidget):
                 "rules are applied automatically when it next starts."
             )
         self._update_actions()
+
+    def add_sub_tab(self, widget: QWidget, title: str) -> None:
+        """Add a page that manages its own state rather than pending edits.
+
+        Backups and the extras apply immediately, so the Save button is hidden
+        while they are showing - it would imply their settings were unsaved.
+        """
+        self.tabs.addTab(_scrollable(widget), title)
+
+    def _on_tab_changed(self, index: int) -> None:
+        widget = self.tabs.widget(index)
+        managed = widget is not None and index < 2
+        self.save_button.setVisible(managed)
+        self.refresh_button.setVisible(managed)
+        self.save_restart_button.setVisible(
+            managed and self.pending_needs_restart() and self._running
+        )
+        if not managed:
+            self.status.setText(
+                "These apply as soon as you change them - there is nothing to save."
+            )
+        else:
+            self.set_server_running(self._running)
 
     def flash_saved(self, message: str) -> None:
         """Confirm a write actually happened, then fade the message away."""

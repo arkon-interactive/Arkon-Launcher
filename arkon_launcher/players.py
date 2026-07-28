@@ -31,9 +31,15 @@ class KnownPlayer:
 
     @property
     def role(self) -> str:
-        if self.is_world_owner:
-            return "World owner"
-        return "Operator" if self.is_op else "Player"
+        """What this player is, with the more consequential fact winning.
+
+        Being an operator is what actually grants power, so it takes precedence
+        over having created the world - which is only trivia once the server is
+        running. Both are shown when they apply to the same person.
+        """
+        if self.is_op:
+            return "Operator (world owner)" if self.is_world_owner else "Operator"
+        return "World owner" if self.is_world_owner else "Player"
 
 
 def _read_json_list(path: Path) -> list[dict]:

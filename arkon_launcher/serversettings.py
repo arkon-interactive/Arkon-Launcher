@@ -172,7 +172,9 @@ SETTINGS: tuple[Setting, ...] = (
     ),
 )
 
-SETTING_GROUPS: tuple[str, ...] = ("Gameplay", "Players", "Appearance", "Performance")
+# Appearance first: the description and icon are what the host is most likely to
+# want to change, and they are the cheapest to get right.
+SETTING_GROUPS: tuple[str, ...] = ("Appearance", "Gameplay", "Players", "Performance")
 
 
 def settings_in(group: str) -> list[Setting]:
@@ -225,6 +227,73 @@ COMMON_GAME_RULES: tuple[str, ...] = (
     "random_tick_speed",
 )
 
+# What each rule actually does, in plain terms. Game rule names are terse and
+# several are actively misleading (`mob_griefing` covers far more than mobs
+# breaking blocks), so every one gets an explanation rather than only the ones
+# that seemed unclear.
+GAME_RULE_HELP = {
+    "advance_time": "Whether the sun moves. Off freezes the time of day.",
+    "advance_weather": "Whether weather changes on its own. Off keeps the current weather.",
+    "allow_entering_nether_using_portals": "Whether nether portals work at all.",
+    "block_drops": "Whether broken blocks drop items. Off means blocks just vanish.",
+    "block_explosion_drop_decay": "Whether blocks destroyed by bed/respawn-anchor blasts still drop.",
+    "command_block_output": "Whether command blocks announce what they did in chat.",
+    "command_blocks_work": "Whether command blocks run at all.",
+    "drowning_damage": "Whether players take damage from running out of air.",
+    "elytra_movement_check": "Anti-cheat for elytra flight. Turn off if a mod causes false kicks.",
+    "ender_pearls_vanish_on_death": "Whether thrown ender pearls disappear if the thrower dies.",
+    "entity_drops": "Whether things like minecarts and item frames drop when destroyed.",
+    "fall_damage": "Whether players take damage from falling.",
+    "fire_damage": "Whether players take damage from fire and lava.",
+    "fire_spread_radius_around_player": "How far from a player fire is allowed to spread, in blocks.",
+    "forgive_dead_players": "Whether angered neutral mobs calm down once the player they were angry at dies.",
+    "freeze_damage": "Whether powder snow can freeze and hurt players.",
+    "global_sound_events": "Whether everyone hears server-wide events like the ender dragon dying.",
+    "immediate_respawn": "Skip the death screen and respawn straight away.",
+    "keep_inventory": "Keep your items when you die instead of dropping them.",
+    "lava_source_conversion": "Whether lava can form new source blocks, as water does.",
+    "limited_crafting": "Players can only craft recipes they have unlocked.",
+    "locator_bar": "Whether the locator bar showing nearby players is displayed.",
+    "log_admin_commands": "Whether operator commands are written to the server log.",
+    "max_block_modifications": "Cap on how many blocks one command may change, guarding against hangs.",
+    "max_command_forks": "Cap on how many contexts a single command can branch into.",
+    "max_command_sequence_length": "Cap on chained command length, guarding against infinite loops.",
+    "max_entity_cramming": "How many entities may occupy one block before they start taking damage. 0 disables it.",
+    "max_minecart_speed": "Top speed of minecarts.",
+    "max_position_deviation": "How far a player may drift from the server's idea of their position before being corrected.",
+    "max_snow_accumulation_height": "How many layers snow may pile up to.",
+    "mob_drops": "Whether killed mobs drop loot.",
+    "mob_explosion_drop_decay": "Whether blocks destroyed by creepers and similar still drop.",
+    "mob_griefing": "Whether mobs can change the world - creepers cratering, endermen moving blocks, villagers farming. Turning it off stops a lot of accidental damage.",
+    "natural_health_regeneration": "Whether health refills from a full hunger bar.",
+    "player_movement_check": "Anti-cheat movement validation. Turn off if a mod causes 'moved too quickly' spam.",
+    "players_nether_portal_creative_delay": "Seconds a creative-mode player stands in a portal before travelling.",
+    "players_nether_portal_default_delay": "Ticks a survival player stands in a portal before travelling. 80 is four seconds.",
+    "players_sleeping_percentage": "What percent of players must sleep to skip the night. 0 lets one person skip it.",
+    "projectiles_can_break_blocks": "Whether arrows and similar can break things like decorated pots.",
+    "pvp": "Whether players can damage each other.",
+    "raids": "Whether pillager raids can trigger.",
+    "random_tick_speed": "How fast crops grow, leaves decay and fire spreads. Higher is faster but costs performance.",
+    "reduced_debug_info": "Hides coordinates and other detail from the F3 screen.",
+    "respawn_radius": "How far from the spawn point new players may appear, in blocks.",
+    "send_command_feedback": "Whether commands print their result in chat.",
+    "show_advancement_messages": "Whether advancement announcements appear in chat.",
+    "show_death_messages": "Whether death messages appear in chat.",
+    "spawn_mobs": "Master switch for all natural mob spawning.",
+    "spawn_monsters": "Whether hostile mobs spawn.",
+    "spawn_patrols": "Whether pillager patrols spawn in the world.",
+    "spawn_phantoms": "Whether phantoms appear when players go too long without sleeping.",
+    "spawn_wandering_traders": "Whether wandering traders turn up.",
+    "spawn_wardens": "Whether wardens can emerge in deep dark biomes.",
+    "spawner_blocks_work": "Whether monster spawner blocks produce mobs.",
+    "spectators_generate_chunks": "Whether flying around in spectator mode generates new terrain.",
+    "spread_vines": "Whether vines grow and spread.",
+    "tnt_explodes": "Whether TNT detonates at all.",
+    "tnt_explosion_drop_decay": "Whether blocks destroyed by TNT still drop items.",
+    "universal_anger": "Angered neutral mobs attack every nearby player, not just the one who provoked them.",
+    "water_source_conversion": "Whether water can form new source blocks - how infinite water pools work.",
+}
+
 FRIENDLY_RULE_NAMES = {
     "keep_inventory": "Keep inventory on death",
     "mob_griefing": "Mobs can change blocks",
@@ -255,6 +324,12 @@ class GameRule:
         if friendly:
             return friendly
         return self.name.replace("_", " ").capitalize()
+
+    @property
+    def help(self) -> str:
+        """Explanation for the tooltip, always ending with the real rule name."""
+        description = GAME_RULE_HELP.get(self.name, "")
+        return f"{description}\n\n({self.name})" if description else self.name
 
     @property
     def as_bool(self) -> bool:
@@ -305,6 +380,31 @@ def read_world_seed(world_dir: Path) -> int | None:
         return None
     seed = data.get("seed")
     return int(seed) if isinstance(seed, int) else None
+
+
+def properties_differ(current: dict[str, str], snapshot: dict[str, str]) -> list[str]:
+    """Keys where the file no longer matches what we last saw.
+
+    Used to notice that server.properties was edited outside the launcher, so
+    the user can be told rather than having their edit silently overwritten.
+    Only keys the launcher actually manages are compared - the file has plenty
+    of entries we neither show nor touch.
+    """
+    managed = {setting.key for setting in SETTINGS}
+    changed: list[str] = []
+    for key in managed:
+        if key not in snapshot:
+            continue
+        if current.get(key) != snapshot.get(key):
+            changed.append(key)
+    return sorted(changed)
+
+
+def label_for(key: str) -> str:
+    for setting in SETTINGS:
+        if setting.key == key:
+            return setting.label
+    return key
 
 
 @dataclass

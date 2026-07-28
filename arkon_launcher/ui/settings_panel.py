@@ -152,17 +152,28 @@ def _scrollable(inner: QWidget) -> QScrollArea:
 
 
 class ServerSettingsPanel(QWidget):
-    """server.properties and game rules for the selected world."""
+    """server.properties and game rules, saved when you say so.
 
-    setting_changed = Signal(object, str)  # (Setting, value)
-    game_rule_changed = Signal(object, str)  # (GameRule, value)
-    reload_requested = Signal()
+    Edits are held as pending changes rather than written on every keystroke, so
+    a half-typed MOTD never reaches the file and it is always clear what has and
+    has not been committed. Rows with unsaved edits are marked, and Save is only
+    enabled when there is something to save.
+    """
+
+    save_requested = Signal()
+    save_and_restart_requested = Signal()
+    refresh_requested = Signal()
+    pending_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._setting_rows: dict[str, SettingRow] = {}
         self._rule_rows: dict[str, GameRuleRow] = {}
         self._running = False
+
+        # key -> new value, awaiting Save.
+        self.pending_settings: dict[str, str] = {}
+        self.pending_rules: dict[str, str] = {}
 
         self.tabs = QTabWidget()
         self.tabs.addTab(_scrollable(self._build_settings()), "Server")
@@ -174,11 +185,25 @@ class ServerSettingsPanel(QWidget):
         self.status.setWordWrap(True)
         self.status.setStyleSheet(HINT_STYLE)
 
-        self.reload_button = QPushButton("Reload from disk")
-        self.reload_button.clicked.connect(self.reload_requested.emit)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setToolTip(
+            "Re-read the settings from the files on disk, discarding anything "
+            "unsaved here."
+        )
+        self.refresh_button.clicked.connect(self.refresh_requested.emit)
 
-        # Settings save the instant they are changed, which is not obvious from
-        # a form with no Save button - so say so, every time.
+        self.save_button = QPushButton("Save")
+        self.save_button.clicked.connect(self.save_requested.emit)
+        self.save_button.setEnabled(False)
+
+        self.save_restart_button = QPushButton("Save and restart")
+        self.save_restart_button.clicked.connect(self.save_and_restart_requested.emit)
+        self.save_restart_button.setVisible(False)
+        self.save_restart_button.setToolTip(
+            "Some of these changes only take effect on startup. This saves them "
+            "and restarts the server now."
+        )
+
         self.saved_label = QLabel("")
         self.saved_label.setStyleSheet("color:#5fb37a;")
         self._saved_timer = QTimer(self)
@@ -188,12 +213,66 @@ class ServerSettingsPanel(QWidget):
         footer = QHBoxLayout()
         footer.addWidget(self.status, 1)
         footer.addWidget(self.saved_label)
-        footer.addWidget(self.reload_button)
+        footer.addWidget(self.refresh_button)
+        footer.addWidget(self.save_button)
+        footer.addWidget(self.save_restart_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.tabs, 1)
         layout.addLayout(footer)
+
+    # --- Pending edits ---
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self.pending_settings or self.pending_rules)
+
+    def pending_needs_restart(self) -> bool:
+        return any(
+            row.setting.needs_restart
+            for key, row in self._setting_rows.items()
+            if key in self.pending_settings
+        )
+
+    def _on_setting_edited(self, setting: Setting, value: str) -> None:
+        self.pending_settings[setting.key] = value
+        self._setting_rows[setting.key].mark_pending(True, "unsaved")
+        self._update_actions()
+
+    def _on_rule_edited(self, rule: GameRule, value: str) -> None:
+        self.pending_rules[rule.name] = value
+        self._rule_rows[rule.name].mark_pending(True, "unsaved")
+        self._update_actions()
+
+    def clear_pending(self) -> None:
+        for key in list(self.pending_settings):
+            row = self._setting_rows.get(key)
+            if row:
+                row.mark_pending(False)
+        for name in list(self.pending_rules):
+            row = self._rule_rows.get(name)
+            if row:
+                row.mark_pending(False)
+        self.pending_settings.clear()
+        self.pending_rules.clear()
+        self._update_actions()
+
+    def _update_actions(self) -> None:
+        count = len(self.pending_settings) + len(self.pending_rules)
+        self.save_button.setEnabled(count > 0)
+        self.save_button.setText(f"Save ({count})" if count else "Save")
+
+        needs_restart = self.pending_needs_restart() and self._running
+        self.save_restart_button.setVisible(needs_restart)
+        if needs_restart:
+            self.save_button.setToolTip(
+                "Saves now. Settings that need a restart will apply the next time "
+                "the server starts."
+            )
+        else:
+            self.save_button.setToolTip("Write these changes to the server's settings.")
+        self.pending_changed.emit()
 
     def _build_settings(self) -> QWidget:
         host = QWidget()
@@ -206,7 +285,7 @@ class ServerSettingsPanel(QWidget):
 
             for setting in settings_in(group_name):
                 row = SettingRow(setting)
-                row.changed.connect(self.setting_changed.emit)
+                row.changed.connect(self._on_setting_edited)
                 self._setting_rows[setting.key] = row
 
                 label = QLabel(setting.label)
@@ -239,6 +318,8 @@ class ServerSettingsPanel(QWidget):
         for key, row in self._setting_rows.items():
             row.set_value(values.get(key, row.setting.default))
             row.mark_pending(False)
+        self.pending_settings.clear()
+        self._update_actions()
 
     def set_seed(self, seed: int | None) -> None:
         self.seed_label.setText(
@@ -272,12 +353,12 @@ class ServerSettingsPanel(QWidget):
 
         for rule in rules:
             row = GameRuleRow(rule)
-            row.changed.connect(self.game_rule_changed.emit)
+            row.changed.connect(self._on_rule_edited)
             self._rule_rows[rule.name] = row
 
             label = QLabel(rule.label)
-            label.setToolTip(rule.name)
-            row.setToolTip(rule.name)
+            label.setToolTip(rule.help)
+            row.setToolTip(rule.help)
             (common_form if rule.name in COMMON_GAME_RULES else rest_form).addRow(label, row)
 
         self._rules_layout.addWidget(common)
@@ -290,14 +371,16 @@ class ServerSettingsPanel(QWidget):
         self._running = running
         if running:
             self.status.setText(
-                "Changes marked 'restart needed' take effect next time the server "
-                "starts. Everything else is applied immediately."
+                "Press Save to write your changes. Anything marked 'restart needed' "
+                "applies when the server next starts; everything else takes effect "
+                "straight away."
             )
         else:
             self.status.setText(
-                "The server is stopped. Changes are saved now, and game rules are "
-                "applied automatically when it next starts."
+                "The server is stopped. Press Save to write your changes - game "
+                "rules are applied automatically when it next starts."
             )
+        self._update_actions()
 
     def flash_saved(self, message: str) -> None:
         """Confirm a write actually happened, then fade the message away."""

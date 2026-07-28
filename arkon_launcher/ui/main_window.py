@@ -116,6 +116,11 @@ class MainWindow(QMainWindow):
         self._announce_timers: list[QTimer] = []
         self._restart_backup_schedule()
 
+        # What server.properties looked like when we last agreed with it, so an
+        # edit made outside the launcher can be noticed rather than clobbered.
+        self._properties_snapshot: dict[str, str] = {}
+        self._last_drift_reported: list[str] = []
+
         self._scanning = False
         self._scan_buffer: list[str] = []
         self._scan_timer = QTimer(self)
@@ -268,9 +273,9 @@ class MainWindow(QMainWindow):
         self.backups_panel.load_settings(self.settings)
 
         self.settings_panel = ServerSettingsPanel()
-        self.settings_panel.setting_changed.connect(self._on_setting_changed)
-        self.settings_panel.game_rule_changed.connect(self._on_game_rule_changed)
-        self.settings_panel.reload_requested.connect(self.refresh_settings)
+        self.settings_panel.save_requested.connect(self.save_settings)
+        self.settings_panel.save_and_restart_requested.connect(self.save_and_restart)
+        self.settings_panel.refresh_requested.connect(lambda: self.refresh_settings(force=True))
 
         self.permissions_panel = PermissionsPanel()
         self.permissions_panel.refresh_requested.connect(self.refresh_permissions)
@@ -1063,68 +1068,137 @@ class MainWindow(QMainWindow):
 
     # --- Server settings and game rules ---
 
-    def refresh_settings(self) -> None:
+    def _properties_path(self):
+        world = self.selected_world()
+        if not world or not self.instance:
+            return None
+        return paths.server_dir(self.instance.directory, world.folder_name) / "server.properties"
+
+    def refresh_settings(self, force: bool = False) -> None:
+        """Repopulate the settings pages from the files on disk.
+
+        Refuses to trample unsaved edits unless the user explicitly asked for a
+        refresh, and warns when the file has been changed behind our back.
+        """
         world = self.selected_world()
         if not world or not self.instance:
             return
-        server_dir = paths.server_dir(self.instance.directory, world.folder_name)
 
-        properties = provision.read_properties(server_dir / "server.properties")
-        if not properties:
-            # Nothing written yet: show what the first start will use.
-            properties = {s.key: s.default for s in serversettings.SETTINGS}
+        path = self._properties_path()
+        on_disk = provision.read_properties(path) if path else {}
+
+        if not force and self.settings_panel.has_pending:
+            # Something is half-edited; leave it alone but check for drift.
+            self._warn_if_drifted(on_disk)
+            return
+
+        properties = on_disk or {s.key: s.default for s in serversettings.SETTINGS}
 
         self.settings_panel.load_properties(properties)
         self.settings_panel.load_game_rules(serversettings.read_game_rules(world.folder))
         self.settings_panel.set_seed(serversettings.read_world_seed(world.folder))
         self.settings_panel.set_server_running(bool(self.server and self.server.is_alive))
+        self.settings_panel.clear_pending()
 
-        # Re-mark anything still waiting to be applied.
+        # What the file looked like when we last agreed with it.
+        self._properties_snapshot = dict(properties)
+
+        # Game rules queued for the next start are still outstanding.
         for name in self.pending.game_rules:
             self.settings_panel.mark_rule_pending(name, True)
 
-    def _on_setting_changed(self, setting, value: str) -> None:
-        world = self.selected_world()
-        if not world or not self.instance:
+    def _warn_if_drifted(self, on_disk: dict[str, str]) -> None:
+        """Tell the user if server.properties was edited outside the launcher."""
+        if not self._properties_snapshot:
             return
-        server_dir = paths.server_dir(self.instance.directory, world.folder_name)
-        path = server_dir / "server.properties"
+        drifted = serversettings.properties_differ(on_disk, self._properties_snapshot)
+        if not drifted or drifted == self._last_drift_reported:
+            return
+        self._last_drift_reported = drifted
 
-        properties = provision.read_properties(path)
-        properties[setting.key] = value
-        server_dir.mkdir(parents=True, exist_ok=True)
-        provision.write_properties(path, properties)
+        names = ", ".join(serversettings.label_for(key) for key in drifted[:4])
+        answer = QMessageBox.question(
+            self,
+            "Settings changed outside Arkon Launcher",
+            f"server.properties has been edited since this page was loaded "
+            f"({names}{'...' if len(drifted) > 4 else ''}).\n\n"
+            f"Refresh this page to show what is actually in the file? Any unsaved "
+            f"changes here will be discarded.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            self.refresh_settings(force=True)
 
-        if setting.key == "server-port":
-            self.port_spin.setValue(int(value))
+    def save_settings(self, then_restart: bool = False) -> None:
+        """Write pending changes, applying live where the server allows it."""
+        path = self._properties_path()
+        if path is None:
+            return
 
+        panel = self.settings_panel
         running = bool(self.server and self.server.is_alive)
-        command = setting.command_for(serversettings.boolean_command_value(setting, value))
+        applied_now: list[str] = []
+        needs_restart: list[str] = []
 
-        if running and command:
-            self._send_command(command)
-            self.settings_panel.mark_setting_pending(setting.key, False)
-            self.settings_panel.flash_saved(f"Saved and applied: {setting.label}")
-        elif running:
-            self.settings_panel.mark_setting_pending(setting.key, True)
-            self.settings_panel.flash_saved(f"Saved: {setting.label} (needs a restart)")
-        else:
-            self.settings_panel.mark_setting_pending(setting.key, False)
-            self.settings_panel.flash_saved(f"Saved: {setting.label}")
+        if panel.pending_settings:
+            properties = provision.read_properties(path)
+            properties.update(panel.pending_settings)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            provision.write_properties(path, properties)
+            self._properties_snapshot = dict(properties)
 
-    def _on_game_rule_changed(self, rule, value: str) -> None:
-        if self.server and self.server.is_alive:
-            self._send_command(f"gamerule {rule.name} {value}")
-            self.settings_panel.mark_rule_pending(rule.name, False)
-            self.settings_panel.flash_saved(f"Applied: {rule.label} = {value}")
-        else:
-            # Game rules live in the world file, which we only read. Queue the
-            # change and let the server apply it once it is up.
-            self.pending.game_rules[rule.name] = value
-            self.settings_panel.mark_rule_pending(rule.name, True)
-            self.settings_panel.flash_saved(
-                f"Queued: {rule.label} = {value} (applies on next start)"
+            for key, value in panel.pending_settings.items():
+                setting = next((s for s in serversettings.SETTINGS if s.key == key), None)
+                if setting is None:
+                    continue
+                if key == "server-port":
+                    try:
+                        self.port_spin.setValue(int(value))
+                    except ValueError:
+                        pass
+                command = setting.command_for(
+                    serversettings.boolean_command_value(setting, value)
+                )
+                if running and command:
+                    self._send_command(command)
+                    applied_now.append(setting.label)
+                else:
+                    needs_restart.append(setting.label)
+
+        for name, value in panel.pending_rules.items():
+            if running:
+                self._send_command(f"gamerule {name} {value}")
+                applied_now.append(name)
+            else:
+                self.pending.game_rules[name] = value
+
+        queued_rules = 0 if running else len(panel.pending_rules)
+        panel.clear_pending()
+        for name in self.pending.game_rules:
+            panel.mark_rule_pending(name, True)
+
+        parts = []
+        if applied_now:
+            parts.append(f"{len(applied_now)} applied now")
+        if needs_restart:
+            parts.append(f"{len(needs_restart)} on next start")
+        if queued_rules:
+            parts.append(f"{queued_rules} game rule(s) queued")
+        panel.flash_saved("Saved - " + (", ".join(parts) if parts else "no changes"))
+
+        if needs_restart and not then_restart and running:
+            self.console.append_notice(
+                f"Saved. These need a restart to take effect: "
+                f"{', '.join(needs_restart)}.",
+                "#ffa94d",
             )
+
+        if then_restart and running:
+            self.restart_server()
+
+    def save_and_restart(self) -> None:
+        self.save_settings(then_restart=True)
 
     def _apply_pending(self) -> None:
         if self.pending.is_empty() or not (self.server and self.server.is_alive):
@@ -1614,6 +1688,8 @@ class MainWindow(QMainWindow):
         elif widget is self.backups_panel:
             self.refresh_backups()
         elif widget is self.settings_panel:
+            # Opening the page re-reads from disk when nothing is half-edited,
+            # so it always reflects reality; otherwise it just checks for drift.
             self.refresh_settings()
         elif widget is self.permissions_panel:
             self.refresh_permissions()

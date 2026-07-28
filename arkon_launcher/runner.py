@@ -51,6 +51,104 @@ PLAYER_UUID = re.compile(r"^UUID of player (\w{1,16}) is ([0-9a-fA-F-]{32,36})")
 FABRIC_MOD_ERROR = re.compile(r"Mod '([^']+)' \(([^)]+)\)")
 
 
+# --- Orphaned servers ---------------------------------------------------------
+#
+# If the launcher dies while a server is up - or is closed the wrong way - the
+# java process survives with nothing attached to it. It holds the world lock and
+# the port, so the next start fails in a way that looks like a bug in the world.
+# It is also easy to miss in Task Manager, where it is just another "java.exe".
+
+
+@dataclass
+class OrphanServer:
+    pid: int
+    world: str
+    server_dir: str
+    started: float
+
+    @property
+    def uptime(self) -> float:
+        return max(0.0, time.time() - self.started)
+
+
+def find_orphan_servers(exclude_pid: int | None = None) -> list[OrphanServer]:
+    """Java processes that look like servers this launcher started."""
+    found: list[OrphanServer] = []
+    try:
+        import psutil
+    except ImportError:
+        return found
+
+    for process in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+        try:
+            info = process.info
+            name = (info.get("name") or "").lower()
+            if not name.startswith("java"):
+                continue
+            if exclude_pid is not None and info["pid"] == exclude_pid:
+                continue
+
+            cmdline = info.get("cmdline") or []
+            joined = " ".join(cmdline)
+            # Our signature: the Fabric server launcher jar plus the --world we
+            # pass. Other people's Minecraft servers are left well alone.
+            if "fabric-server" not in joined:
+                continue
+
+            world = ""
+            if "--world" in cmdline:
+                index = cmdline.index("--world")
+                if index + 1 < len(cmdline):
+                    world = cmdline[index + 1]
+
+            try:
+                working_dir = process.cwd()
+            except Exception:
+                working_dir = ""
+
+            if ".arkonlauncher" not in (working_dir or "") and ".arkonlauncher" not in joined:
+                continue
+
+            found.append(
+                OrphanServer(
+                    pid=info["pid"],
+                    world=world or "(unknown world)",
+                    server_dir=working_dir,
+                    started=float(info.get("create_time") or time.time()),
+                )
+            )
+        except Exception:
+            continue
+    return found
+
+
+def kill_process(pid: int, grace: float = 8.0) -> bool:
+    """Terminate a process, escalating to a hard kill. True if it is gone."""
+    try:
+        import psutil
+    except ImportError:
+        return False
+
+    try:
+        process = psutil.Process(pid)
+    except Exception:
+        return True  # Already gone.
+
+    try:
+        process.terminate()
+        process.wait(timeout=grace)
+        return True
+    except Exception:
+        pass
+
+    try:
+        process.kill()
+        process.wait(timeout=5)
+        return True
+    except Exception:
+        return False
+
+
 class ServerState(str, Enum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -170,6 +268,19 @@ class ServerProcess:
     def on_players(self, callback: Callable[[set[str]], None]) -> None:
         """Called whenever someone joins or leaves, so the UI can keep up."""
         self._player_listeners.append(callback)
+
+    def detach(self) -> None:
+        """Stop calling back into the UI.
+
+        Called before the window closes. The reader thread keeps running until
+        the process actually exits, and delivering signals to a widget that is
+        being destroyed is a crash - so the listeners are dropped first and the
+        process is stopped afterwards.
+        """
+        self._line_listeners.clear()
+        self._state_listeners.clear()
+        self._player_listeners.clear()
+        self._join_listeners.clear()
 
     def on_join(self, callback: Callable[[str], None]) -> None:
         """Called with the player's name each time somebody connects."""
@@ -389,6 +500,29 @@ class ServerProcess:
         if self._reader is not None:
             self._reader.join(timeout=10)
 
+        return self.exit_code
+
+    def kill(self, grace: float = 10.0) -> int | None:
+        """Force the server down without waiting for it to save.
+
+        The escape hatch for a hung server. Unsaved chunks are lost, which is
+        why it is never the automatic path - `stop()` asks politely first.
+        """
+        if not self.is_alive or self._process is None:
+            return self.exit_code
+
+        self._set_state(ServerState.STOPPING)
+        self._process.terminate()
+        deadline = time.time() + grace
+        while time.time() < deadline and self.is_alive:
+            time.sleep(0.2)
+
+        if self.is_alive:
+            self._process.kill()
+            time.sleep(0.5)
+
+        if self._reader is not None:
+            self._reader.join(timeout=5)
         return self.exit_code
 
     def wait_for_ready(self, timeout: float = 600.0) -> bool:

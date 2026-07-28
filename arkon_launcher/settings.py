@@ -52,6 +52,15 @@ class AppSettings:
     # without being asked first.
     check_for_updates: bool = True
 
+    # Extra entries on the player menu in the console. Each is a label and a
+    # command template; {player} is replaced with whoever was clicked.
+    custom_player_actions: list[dict] = field(
+        default_factory=lambda: [
+            {"label": "Teleport to spawn", "command": "spawn {player}"},
+            {"label": "Heal", "command": "effect give {player} minecraft:instant_health 1 10"},
+        ]
+    )
+
     # Scheduled backups, off unless asked for.
     backup_schedule_enabled: bool = False
     backup_interval_hours: int = 6

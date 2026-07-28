@@ -270,13 +270,24 @@ class ConsoleView(QWidget):
         self.command_entered.emit(command)
 
     def _append_player(self, name: str) -> None:
-        """Put a clicked player's name at the end of whatever is being typed."""
+        """Ask the window what can be done to this player, and offer it.
+
+        Appending the name was the original behaviour, but with autocompletion
+        in the box that is the easy half of the job - the useful half is the
+        actions themselves. Appending is still offered at the bottom of the
+        menu for anything not covered.
+        """
+        self.player_clicked.emit(name)
+
+    def append_player_name(self, name: str) -> None:
         text = self.command_box.text()
         if text and not text.endswith(" "):
             text += " "
         self.command_box.setText(text + name)
         self.command_box.setFocus()
-        self.player_clicked.emit(name)
+
+    def player_button(self, name: str):
+        return self.players._buttons.get(name)
 
     def set_completions(self, words: list[str]) -> None:
         """Words offered by the completer: commands, then online player names."""

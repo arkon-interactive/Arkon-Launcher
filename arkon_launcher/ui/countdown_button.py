@@ -36,6 +36,9 @@ class CountdownButton(QPushButton):
     triggered = Signal()
     armed = Signal()
     cancelled = Signal()
+    # Ctrl+click: a deliberate override, so it fires at once with its own
+    # countdown handled by the caller rather than arming the normal one.
+    ctrl_triggered = Signal()
 
     def __init__(self, text: str, parent=None, delay_ms: int = DEFAULT_DELAY_MS) -> None:
         super().__init__(text, parent)
@@ -155,6 +158,17 @@ class CountdownButton(QPushButton):
             self.cancel()
             event.accept()
             return
+
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier:
+            # Held Ctrl means "I know what I am doing" - skip the countdown and
+            # let the caller decide what the override does.
+            if self.is_armed:
+                self._stop()
+            if self.isEnabled():
+                self.ctrl_triggered.emit()
+            event.accept()
+            return
+
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming

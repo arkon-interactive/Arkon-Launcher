@@ -12,8 +12,9 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImage
+from PySide6.QtGui import QCursor, QDesktopServices, QImage
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -49,6 +51,7 @@ from .. import (
     updater,
     worlds,
 )
+from .. import runner
 from ..runner import ServerConfig, ServerProcess, ServerState, sanitize_jvm_args
 from ..settings import AppSettings, WorldSettings
 from .. import luckperms, permissionnodes, serversettings
@@ -135,13 +138,22 @@ class MainWindow(QMainWindow):
         self._queued_whitelist: set[str] = set()
         # Players whose head has already been requested this session.
         self._avatars_requested: set[str] = set()
+        # Set once the window starts closing, so late callbacks stay quiet.
+        self._shutting_down = False
 
         self._scanning = False
         self._scan_buffer: list[str] = []
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(self._harvest_scan)
 
+        self._kill_timer = QTimer(self)
+        self._kill_timer.timeout.connect(self._kill_tick)
+        self._kill_deadline = 0
+
         QTimer.singleShot(0, self.discover_instances)
+        # A server left behind by a previous session blocks the world and the
+        # port, so look before the user tries to start and fails confusingly.
+        QTimer.singleShot(1500, self.check_for_orphans)
         # Give the window a moment to appear before touching the network.
         QTimer.singleShot(4000, self.check_for_update)
 
@@ -331,13 +343,16 @@ class MainWindow(QMainWindow):
             "Click again to start immediately, right-click or press Esc to cancel."
         )
 
-        self.stop_button = CountdownButton("Stop server")
+        self.stop_button = CountdownButton("Server stopped")
         self.stop_button.triggered.connect(self.stop_server)
         self.stop_button.setEnabled(False)
         self.stop_button.setToolTip(
             "Saves the world and shuts the server down.\n"
-            "Click again to stop immediately, right-click or press Esc to cancel."
+            "Click again to stop immediately, right-click or press Esc to cancel.\n\n"
+            "Ctrl+click to force quit instead - use only if it has stopped "
+            "responding, as unsaved changes are lost."
         )
+        self.stop_button.ctrl_triggered.connect(self.kill_server)
 
         self.reload_button = CountdownButton("Reload server")
         self.reload_button.triggered.connect(self.reload_server)
@@ -376,6 +391,7 @@ class MainWindow(QMainWindow):
 
         self.console = ConsoleView()
         self.console.command_entered.connect(self._send_command)
+        self.console.player_clicked.connect(self._show_player_actions)
 
         self.connection_panel = ConnectionPanel()
         self.connection_panel.refresh_requested.connect(self.refresh_connection)
@@ -622,6 +638,8 @@ class MainWindow(QMainWindow):
         )
         self.start_button.setEnabled(can_start)
         self.stop_button.setEnabled(running)
+        # Reads as a state when there is nothing to stop, an action when there is.
+        self.stop_button.setText("Stop server" if running else "Server stopped")
         self.reload_button.setEnabled(running)
         self.restart_button.setEnabled(running)
         self.settings_panel.set_server_running(running)
@@ -787,6 +805,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1500, self.refresh_connection)
 
     def _on_server_state(self, state: ServerState) -> None:
+        # Nothing may open a dialog or schedule work once the window is closing.
+        if self._shutting_down:
+            return
         if state is ServerState.RUNNING:
             self.console.append_notice("Server is ready. Friends can connect now.")
             self._restarts = 0
@@ -1047,6 +1068,72 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(4000, self._check_playit_tunnel)
 
     # --- Players ---
+
+    # --- Player actions from the console ---
+
+    def _show_player_actions(self, name: str) -> None:
+        """Menu of things that can be done to the player whose head was clicked.
+
+        Toggles read their current state first, so the menu says what clicking
+        will actually do rather than offering both directions and hoping.
+        """
+        server_dir = self._server_dir()
+        if server_dir is None or not (self.server and self.server.is_alive):
+            return
+
+        is_op = any(
+            str(entry.get("name", "")).lower() == name.lower()
+            for entry in players.read_ops(server_dir)
+        )
+        is_whitelisted = any(
+            str(entry.get("name", "")).lower() == name.lower()
+            for entry in players.read_whitelist(server_dir)
+        )
+
+        menu = QMenu(self)
+        menu.addAction(name).setEnabled(False)
+        menu.addSeparator()
+
+        def add(label: str, command: str) -> None:
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _=False, c=command: self._player_command(c, name))
+
+        add("Remove operator" if is_op else "Make operator",
+            "deop {player}" if is_op else "op {player}")
+        add("Remove from whitelist" if is_whitelisted else "Add to whitelist",
+            "whitelist remove {player}" if is_whitelisted else "whitelist add {player}")
+        menu.addSeparator()
+        add("Kick", "kick {player}")
+        add("Ban", "ban {player}")
+        menu.addSeparator()
+        add("Teleport to spawn point", "tp {player} @e[type=marker,limit=1]")
+        add("Survival", "gamemode survival {player}")
+        add("Creative", "gamemode creative {player}")
+        add("Spectator", "gamemode spectator {player}")
+
+        custom = [
+            entry
+            for entry in (self.settings.custom_player_actions or [])
+            if isinstance(entry, dict) and entry.get("label") and entry.get("command")
+        ]
+        if custom:
+            menu.addSeparator()
+            for entry in custom:
+                add(str(entry["label"]), str(entry["command"]))
+
+        menu.addSeparator()
+        insert = menu.addAction("Put the name in the command box")
+        insert.triggered.connect(lambda: self.console.append_player_name(name))
+
+        button = self.console.player_button(name)
+        if button is not None:
+            menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        else:
+            menu.exec(QCursor.pos())
+
+    def _player_command(self, template: str, name: str) -> None:
+        command = template.replace("{player}", name)
+        self._send_command(command)
 
     # --- Passive permission scanning ---
 
@@ -2122,6 +2209,111 @@ class MainWindow(QMainWindow):
         elif widget is self.connection_panel and not self.connection.status.lan_addresses:
             self.refresh_connection()
 
+    def kill_server(self, countdown: int = 10) -> None:
+        """Force quit after a short countdown - the hung-server escape hatch."""
+        if not (self.server and self.server.is_alive):
+            self.check_for_orphans(announce_when_none=True)
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Force quit the server?",
+            f"This kills the server without letting it save. Anything since the "
+            f"last save is lost.\n\n"
+            f"Only worth doing if it has stopped responding - Stop asks it to "
+            f"shut down cleanly.\n\n"
+            f"Force quit in {countdown} seconds?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.console.append_notice(
+            f"Force quitting in {countdown} seconds. Press Stop to shut down "
+            f"cleanly instead.",
+            "#ff6b6b",
+        )
+        self._kill_deadline = countdown
+        self._kill_timer.start(1000)
+
+    def _kill_tick(self) -> None:
+        self._kill_deadline -= 1
+        if not (self.server and self.server.is_alive):
+            self._kill_timer.stop()
+            return
+        if self._kill_deadline > 0:
+            self._set_status(f"Force quitting in {self._kill_deadline}...")
+            return
+
+        self._kill_timer.stop()
+        self.console.append_notice("Force quitting the server now.", "#ff6b6b")
+        server = self.server
+        manager = self.connection
+
+        def work(report):
+            report("Force quitting...")
+            code = server.kill()
+            manager.release()
+            return code
+
+        self._run(work, lambda _: self._update_buttons())
+
+    def check_for_orphans(self, announce_when_none: bool = False) -> None:
+        """Find and offer to kill servers left behind by a previous session.
+
+        These hold the world lock and the port, so the next start fails in a way
+        that looks like the world is broken. They are also easy to miss in Task
+        Manager, where they are just another java.exe.
+        """
+        running_pid = None
+        if self.server and self.server.is_alive and self.server._process:
+            running_pid = self.server._process.pid
+
+        orphans = runner.find_orphan_servers(exclude_pid=running_pid)
+        if not orphans:
+            if announce_when_none:
+                self.console.append_notice("No leftover server processes found.")
+            return
+
+        listing = "\n".join(
+            f"  {o.world}  -  running {int(o.uptime // 60)} min  (pid {o.pid})"
+            for o in orphans
+        )
+        answer = QMessageBox.question(
+            self,
+            "Leftover server found",
+            f"{len(orphans)} Minecraft server started by Arkon Launcher is still "
+            f"running with nothing attached to it:\n\n{listing}\n\n"
+            f"It holds the world open, so starting that world again will fail "
+            f"until it is gone.\n\nStop it now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        def work(report):
+            results = []
+            for orphan in orphans:
+                report(f"Stopping leftover server {orphan.pid}...")
+                results.append((orphan, runner.kill_process(orphan.pid)))
+            return results
+
+        def done(results):
+            for orphan, killed in results:
+                self.console.append_notice(
+                    f"Stopped leftover server for '{orphan.world}' (pid {orphan.pid})."
+                    if killed
+                    else f"Could not stop pid {orphan.pid} - it may need Task Manager.",
+                    "#9ae6b4" if killed else "#ffa94d",
+                )
+            # The world lock is free again, so the list is now wrong.
+            self.load_worlds()
+            self._update_buttons()
+
+        self._run(work, done)
+
     def reload_server(self) -> None:
         """Re-read datapacks and server config without disconnecting anyone."""
         if not (self.server and self.server.is_alive):
@@ -2162,7 +2354,14 @@ class MainWindow(QMainWindow):
             )
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """Never yank a running server just because the window was closed."""
+        """Shut down without letting a dying window take the app with it.
+
+        The order matters. The reader thread keeps running until the process
+        actually exits, so if its callbacks are still attached while the window
+        is being destroyed they will fire into a half-deleted widget - and a
+        state change during shutdown used to open a modal crash-triage dialog on
+        top of that. Detaching first makes the rest safe.
+        """
         if self.server and self.server.is_alive:
             answer = QMessageBox.question(
                 self,
@@ -2174,9 +2373,47 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.Cancel:
                 event.ignore()
                 return
+
+            self._shutting_down = True
+            self._quiesce()
+
             if answer == QMessageBox.Yes:
                 self._set_status("Stopping server...")
-                self.server.stop()
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    self.server.stop()
+                finally:
+                    QApplication.restoreOverrideCursor()
+            else:
+                # Leaving it running is a choice, but it must not be a silent
+                # one - an invisible java process holding the world lock is
+                # exactly what stops the next launch working.
+                self._remember_orphan()
 
+        self._shutting_down = True
+        self._quiesce()
         self.connection.release()
         event.accept()
+
+    def _quiesce(self) -> None:
+        """Detach everything that could call back into a closing window."""
+        if self.server is not None:
+            self.server.detach()
+        for timer in (
+            getattr(self, "_uptime_timer", None),
+            getattr(self, "_backup_timer", None),
+            getattr(self, "_restart_timer", None),
+            getattr(self, "_scan_timer", None),
+        ):
+            if timer is not None:
+                timer.stop()
+        for timer in getattr(self, "_announce_timers", []) + getattr(
+            self, "_restart_announce_timers", []
+        ):
+            timer.stop()
+
+    def _remember_orphan(self) -> None:
+        self.console.append_notice(
+            "The server is still running in the background. Reopen Arkon Launcher "
+            "to take control of it again, or stop it from there."
+        )

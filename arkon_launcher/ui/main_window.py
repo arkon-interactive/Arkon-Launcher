@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from .. import (
     __version__,
+    avatars,
     backups,
     connection,
     crashdoctor,
@@ -130,6 +131,8 @@ class MainWindow(QMainWindow):
         self._last_drift_reported: list[str] = []
         # Whitelist additions made while stopped, applied on next start.
         self._queued_whitelist: set[str] = set()
+        # Players whose head has already been requested this session.
+        self._avatars_requested: set[str] = set()
 
         self._scanning = False
         self._scan_buffer: list[str] = []
@@ -679,6 +682,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(3000, self.refresh_permissions)
             QTimer.singleShot(4000, self._start_passive_scan)
             QTimer.singleShot(5000, self._apply_queued_whitelist)
+            QTimer.singleShot(5500, self._load_command_completions)
         elif state is ServerState.CRASHED:
             self.console.append_notice(
                 f"Server exited unexpectedly (code {self.server.exit_code if self.server else '?'}).",
@@ -1014,6 +1018,54 @@ class MainWindow(QMainWindow):
         elif current is self.permissions_panel:
             self.refresh_permissions()
         self._refresh_status()
+        self._refresh_console_players()
+
+    def _refresh_console_players(self) -> None:
+        """Update the console's player strip and the completer's word list."""
+        online = sorted(self.server.players) if self.server and self.server.is_alive else []
+        self.console.set_players(online)
+        self._refresh_completions(online)
+
+        # Heads come from Mojang, so they are fetched off the GUI thread and
+        # only once per player - the result is cached on disk.
+        for name in online:
+            uuid = (self.server.player_uuids or {}).get(name) if self.server else None
+            if not uuid or name in self._avatars_requested:
+                continue
+            self._avatars_requested.add(name)
+            self._run(
+                lambda report, u=uuid: avatars.fetch_head(u, 24),
+                lambda path, n=name: self.console.set_avatar(n, str(path)) if path else None,
+            )
+
+    def _load_command_completions(self) -> None:
+        """Read the command tree once per run so the console can complete it."""
+        if self._help_lines is not None or not (self.server and self.server.is_alive):
+            self._refresh_completions()
+            return
+        server = self.server
+
+        def work(report):
+            return server.query("help", settle=1.5, timeout=20)
+
+        def done(lines):
+            self._help_lines = lines
+            self._refresh_completions()
+
+        self._run(work, done)
+
+    def _refresh_completions(self, online: list[str] | None = None) -> None:
+        """Commands from the live server, plus whoever is online."""
+        words: list[str] = []
+        if self._help_lines:
+            words.extend(
+                node.node.rsplit(".", 1)[-1]
+                for node in permissionnodes.nodes_from_help(self._help_lines)
+            )
+        if online is None:
+            online = sorted(self.server.players) if self.server and self.server.is_alive else []
+        words.extend(online)
+        self.console.set_completions(sorted(set(words)))
 
     def _auto_op_owner(self) -> None:
         """Give the person who created the world operator rights on first run.

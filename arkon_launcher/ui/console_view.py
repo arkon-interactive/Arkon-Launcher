@@ -12,15 +12,27 @@ not to fall over during a long session:
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QSize, QStringListModel, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QPainter,
+    QPixmap,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
+    QCompleter,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,10 +54,113 @@ COMMAND_COLOUR = "#63b3ed"
 NOTICE_COLOUR = "#9ae6b4"
 
 
+class WordCompleter(QCompleter):
+    """Completes the word under the cursor rather than the whole line.
+
+    A console line is `command arg arg`, so completing against the entire text
+    would only ever match the first token. Splitting on spaces means the command
+    completes at the start and player names complete wherever they appear.
+    """
+
+    def splitPath(self, path: str) -> list[str]:  # noqa: N802 - Qt naming
+        return [path.split(" ")[-1]]
+
+    def pathFromIndex(self, index) -> str:  # noqa: N802 - Qt naming
+        completion = super().pathFromIndex(index)
+        text = self.widget().text() if self.widget() else ""
+        words = text.split(" ")[:-1]
+        return " ".join(words + [completion])
+
+
+class PlayerStrip(QWidget):
+    """Heads of everyone online; clicking one drops their name into the input."""
+
+    player_clicked = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._buttons: dict[str, QToolButton] = {}
+
+        self.empty_label = QLabel("Nobody is online.")
+        self.empty_label.setStyleSheet("color:#8b949e;")
+
+        self._row = QHBoxLayout()
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(6)
+        self._row.addWidget(self.empty_label)
+        self._row.addStretch(1)
+
+        host = QWidget()
+        host.setLayout(self._row)
+
+        # Scrolls horizontally rather than wrapping: a full server would
+        # otherwise push the console itself off the screen.
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setFixedHeight(58)
+        area.setWidget(host)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(area)
+
+    def set_players(self, names: list[str]) -> None:
+        for name in list(self._buttons):
+            if name not in names:
+                button = self._buttons.pop(name)
+                self._row.removeWidget(button)
+                button.deleteLater()
+
+        for name in names:
+            if name in self._buttons:
+                continue
+            button = QToolButton()
+            button.setText(name)
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setAutoRaise(True)
+            button.setIconSize(QSize(24, 24))
+            button.setIcon(self._placeholder_icon(name))
+            button.setToolTip(f"Add {name} to the command")
+            button.clicked.connect(lambda _=False, n=name: self.player_clicked.emit(n))
+            self._buttons[name] = button
+            self._row.insertWidget(self._row.count() - 1, button)
+
+        self.empty_label.setVisible(not names)
+
+    def set_avatar(self, name: str, path: str) -> None:
+        button = self._buttons.get(name)
+        if button and path:
+            icon = QIcon(path)
+            if not icon.isNull():
+                button.setIcon(icon)
+
+    @staticmethod
+    def _placeholder_icon(name: str) -> QIcon:
+        """A coloured initial, shown until (or instead of) the real head."""
+        size = 24
+        image = QImage(size, size, QImage.Format_ARGB32)
+        # Deterministic colour per name, so a player looks the same each session.
+        hue = (sum(ord(c) for c in name) * 37) % 360
+        image.fill(QColor.fromHsv(hue, 120, 140))
+
+        painter = QPainter(image)
+        painter.setPen(QColor("#f0f2f0"))
+        font = QFont()
+        font.setBold(True)
+        font.setPointSize(11)
+        painter.setFont(font)
+        painter.drawText(image.rect(), Qt.AlignCenter, name[:1].upper())
+        painter.end()
+        return QIcon(QPixmap.fromImage(image))
+
+
 class ConsoleView(QWidget):
     """Read-only log pane plus the command entry beneath it."""
 
     command_entered = Signal(str)
+    player_clicked = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,6 +188,16 @@ class ConsoleView(QWidget):
         self.command_box.returnPressed.connect(self._on_submit)
         self.command_box.installEventFilter(self)
 
+        self._completion_model = QStringListModel(self)
+        self.completer = WordCompleter(self._completion_model, self)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.completer.setFilterMode(Qt.MatchStartsWith)
+        self.command_box.setCompleter(self.completer)
+
+        self.players = PlayerStrip()
+        self.players.player_clicked.connect(self._append_player)
+
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._on_submit)
 
@@ -90,6 +215,7 @@ class ConsoleView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(top)
         layout.addWidget(self.output, 1)
+        layout.addWidget(self.players)
         layout.addLayout(bottom)
 
         self.set_enabled_for_running(False)
@@ -142,6 +268,25 @@ class ConsoleView(QWidget):
         self.command_box.clear()
         self.append_notice(f"> {command}", COMMAND_COLOUR)
         self.command_entered.emit(command)
+
+    def _append_player(self, name: str) -> None:
+        """Put a clicked player's name at the end of whatever is being typed."""
+        text = self.command_box.text()
+        if text and not text.endswith(" "):
+            text += " "
+        self.command_box.setText(text + name)
+        self.command_box.setFocus()
+        self.player_clicked.emit(name)
+
+    def set_completions(self, words: list[str]) -> None:
+        """Words offered by the completer: commands, then online player names."""
+        self._completion_model.setStringList(words)
+
+    def set_players(self, names: list[str]) -> None:
+        self.players.set_players(names)
+
+    def set_avatar(self, name: str, path: str) -> None:
+        self.players.set_avatar(name, path)
 
     def set_enabled_for_running(self, running: bool) -> None:
         self.command_box.setEnabled(running)

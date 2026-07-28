@@ -1,76 +1,93 @@
 # Publishing a release
 
-The in-app updater checks
-`https://api.github.com/repos/arkon-interactive/Arkon-Launcher/releases/latest`
-and compares the tag against `__version__`. For it to find an update, a release
-needs a version tag and the installer attached as an asset.
-
-## Steps
-
-1. **Bump the version** in `arkon_launcher/__init__.py`. That single value flows
-   into the window title, the installer, and Add/Remove Programs.
-
-2. **Update `CHANGELOG.md`** — move the Unreleased notes under the new version.
-
-3. **Build:**
+One command does the whole thing:
 
 ```bash
-python build.py --clean
+python tools/release.py
 ```
 
-   Produces `dist/ArkonLauncherSetup.exe`.
+It runs in an order chosen so everything that can fail cheaply fails *before*
+anything irreversible happens — an aborted release that already pushed a tag is
+far more annoying to clean up than one that refused to start:
 
-4. **Commit and push** (GitHub Desktop, or `git push`).
-
-5. **Tag and publish.** On GitHub → Releases → Draft a new release:
-   - Tag: `v0.6.0` — the leading `v` is optional, the updater strips it.
-   - Title: `0.6.0`
-   - Body: paste that version's changelog section. It's shown in the update
-     dialog's details.
-   - **Attach `dist/ArkonLauncherSetup.exe`.** Without it the updater can only
-     send people to the releases page.
-
-## What the updater expects
-
-| | |
+| Step | What it checks or does |
 |---|---|
-| Tag | Anything parsing as `MAJOR.MINOR.PATCH`; `v` prefix fine |
-| Asset | Filename matching `ArkonLauncher*Setup*.exe` |
-| Pre-releases | Ignored — the API's `latest` excludes them |
+| **Validate** | `CHANGELOG.md` has a section for this version; working tree is clean; the tag doesn't already exist |
+| **Build** | `build.py --clean` → `dist/ArkonLauncherSetup.exe` |
+| **Smoke-test** | Launches the packaged exe and confirms it's still alive 20s later |
+| **Tag** | `v<version>`, annotated |
+| **Push** | Commits, then the tag |
+| **Publish** | Creates the GitHub release with the installer attached |
 
-Version comparison is numeric, not lexical, so `0.10.0` correctly beats `0.9.0`.
+The smoke test earns its twenty seconds: a build that dies on launch has shipped
+from here before, when PyInstaller's entry point broke every relative import.
 
-## What the updater does
+## Before you run it
 
-On startup it checks once, in the background. If a newer release exists it says
-so and offers to download — nothing is fetched without a yes, and nothing is run
-without a second yes. The download is size-checked before being offered.
+1. **Bump the version** in `arkon_launcher/__init__.py`. That one value flows
+   into the window title, the installer, and Add/Remove Programs.
+2. **Add a `## <version>` section to `CHANGELOG.md`.** The release refuses to
+   start without one, and its contents become the release notes.
+3. **Commit everything.** A dirty tree stops the release.
 
-Portable copies are detected and *not* auto-updated: the installer can't sensibly
-replace a folder someone may have put on a USB stick, so those are pointed at the
-releases page instead.
-
-If the server is running, updating warns first — the installer closes the
-launcher to replace it.
-
-Turn the check off with `check_for_updates` in `settings.json`.
-
-## Using the GitHub CLI instead
-
-`gh` isn't installed here. If you'd rather script releases:
+## Options
 
 ```bash
-winget install --id GitHub.cli
+python tools/release.py --check         # validate only, change nothing
+python tools/release.py --no-publish    # build, tag and push; no GitHub release
+python tools/release.py --publish-only  # publish an already-tagged version
+python tools/release.py --skip-build    # reuse whatever is in dist/
 ```
 
-Then authenticate once — this is interactive, so it needs a real terminal:
+`--check` is worth running any time — it's read-only and takes a second.
+
+## One-time setup
+
+Publishing needs the GitHub CLI signed in. It's installed already; the login is
+interactive, so it has to be run from a real terminal:
 
 ```bash
 gh auth login
 ```
 
-After that a release is one command:
+Choose GitHub.com → HTTPS → authenticate in browser. After that
+`python tools/release.py` works end to end.
 
-```bash
-gh release create v0.6.0 "dist/ArkonLauncherSetup.exe" --title "0.6.0" --notes-file CHANGELOG.md
-```
+Without it, everything local still happens and the script prints the manual
+steps.
+
+## Publishing by hand
+
+If you'd rather not use the CLI:
+
+1. Build: `python build.py --clean`
+2. Push and tag: `git tag -a v0.6.0 -m "Arkon Launcher 0.6.0" && git push origin main --tags`
+3. Go to <https://github.com/arkon-interactive/Arkon-Launcher/releases/new>
+   - Tag: `v0.6.0`
+   - Title: `0.6.0`
+   - Notes: the `## 0.6.0` section of `CHANGELOG.md`
+   - **Attach `dist/ArkonLauncherSetup.exe`**
+
+## What the in-app updater expects
+
+It reads
+`https://api.github.com/repos/arkon-interactive/Arkon-Launcher/releases/latest`
+and compares against `__version__`.
+
+| | |
+|---|---|
+| Tag | Anything parsing as `MAJOR.MINOR.PATCH`; a `v` prefix is fine |
+| Asset | Filename matching `ArkonLauncher*Setup*.exe` |
+| Pre-releases | Ignored — the API's `latest` excludes them |
+
+**A release with no installer attached is the one thing that breaks it** — the
+updater can then only send people to the releases page. `tools/release.py`
+always attaches it.
+
+Version comparison is numeric, not lexical, so `0.10.0` correctly beats `0.9.0`.
+
+Nothing is downloaded without the user agreeing and nothing is run without a
+second confirmation. Portable copies are pointed at the releases page rather
+than being replaced, since an installer can't sensibly overwrite a folder
+someone may have put on a USB stick. Turn the check off with
+`check_for_updates` in `settings.json`.

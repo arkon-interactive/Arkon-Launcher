@@ -7,15 +7,21 @@ is stopped are queued and applied the moment it next reports ready.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -143,6 +149,150 @@ class GameRuleRow(QWidget):
         self.note.setVisible(pending)
 
 
+class WhitelistEditor(QGroupBox):
+    """The whitelist as a list you can actually edit.
+
+    Names can be added for people who have never connected: when the server is
+    running the name is resolved through it, and when it is stopped the addition
+    is queued and applied on the next start. Writing a name into whitelist.json
+    without a UUID is deliberately avoided - the server would not reliably
+    honour it.
+    """
+
+    add_requested = Signal(str)
+    remove_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Whitelisted players", parent)
+
+        self.list = QListWidget()
+        self.list.setMaximumHeight(130)
+        self.list.itemSelectionChanged.connect(self._update_buttons)
+
+        self.entry = QLineEdit(placeholderText="Minecraft username")
+        self.entry.returnPressed.connect(self._add)
+        add_button = QPushButton("Add")
+        add_button.clicked.connect(self._add)
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.clicked.connect(self._remove)
+
+        row = QHBoxLayout()
+        row.addWidget(self.entry, 1)
+        row.addWidget(add_button)
+        row.addWidget(self.remove_button)
+
+        self.hint = QLabel("")
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet(HINT_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.list)
+        layout.addLayout(row)
+        layout.addWidget(self.hint)
+        self._update_buttons()
+
+    def set_names(self, names: list[str], queued: list[str], running: bool) -> None:
+        self.list.clear()
+        for name in sorted(names, key=str.lower):
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, name)
+            self.list.addItem(item)
+        for name in sorted(queued, key=str.lower):
+            item = QListWidgetItem(f"{name}   (added on next start)")
+            item.setData(Qt.UserRole, name)
+            item.setForeground(Qt.darkYellow)
+            self.list.addItem(item)
+
+        if not names and not queued:
+            placeholder = QListWidgetItem("Nobody is whitelisted yet.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.list.addItem(placeholder)
+
+        self.hint.setText(
+            "Names are checked against Mojang when added, so people who have never "
+            "joined can be whitelisted in advance."
+            if running
+            else "The server is stopped, so additions are queued and applied when it "
+            "next starts."
+        )
+        self._update_buttons()
+
+    def _add(self) -> None:
+        name = self.entry.text().strip()
+        if name:
+            self.entry.clear()
+            self.add_requested.emit(name)
+
+    def _remove(self) -> None:
+        item = self.list.currentItem()
+        if item and item.data(Qt.UserRole):
+            self.remove_requested.emit(item.data(Qt.UserRole))
+
+    def _update_buttons(self) -> None:
+        item = self.list.currentItem()
+        self.remove_button.setEnabled(bool(item and item.data(Qt.UserRole)))
+
+
+class ServerIconPicker(QGroupBox):
+    """Sets server-icon.png, the image shown in the multiplayer list."""
+
+    icon_chosen = Signal(str)
+    icon_cleared = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Server icon", parent)
+
+        self.preview = QLabel()
+        self.preview.setFixedSize(64, 64)
+        self.preview.setStyleSheet("border:1px solid #2f343b;")
+        self.preview.setAlignment(Qt.AlignCenter)
+
+        choose = QPushButton("Choose image...")
+        choose.clicked.connect(self._choose)
+        self.clear_button = QPushButton("Remove")
+        self.clear_button.clicked.connect(self.icon_cleared.emit)
+
+        hint = QLabel(
+            "Any image works - it is scaled to the 64x64 PNG Minecraft expects. "
+            "Players see it next to the server in their list."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(HINT_STYLE)
+
+        buttons = QVBoxLayout()
+        buttons.addWidget(choose)
+        buttons.addWidget(self.clear_button)
+        buttons.addStretch(1)
+
+        row = QHBoxLayout()
+        row.addWidget(self.preview)
+        row.addLayout(buttons)
+        row.addWidget(hint, 1)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(row)
+
+    def set_icon(self, path: Path | None) -> None:
+        if path and Path(path).is_file():
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                self.preview.setPixmap(
+                    pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+                self.clear_button.setEnabled(True)
+                return
+        self.preview.clear()
+        self.preview.setText("none")
+        self.clear_button.setEnabled(False)
+
+    def _choose(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Choose a server icon", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
+        )
+        if chosen:
+            self.icon_chosen.emit(chosen)
+
+
 def _scrollable(inner: QWidget) -> QScrollArea:
     area = QScrollArea()
     area.setWidgetResizable(True)
@@ -238,6 +388,10 @@ class ServerSettingsPanel(QWidget):
     def _on_setting_edited(self, setting: Setting, value: str) -> None:
         self.pending_settings[setting.key] = value
         self._setting_rows[setting.key].mark_pending(True, "unsaved")
+        if setting.key == "white-list":
+            # Reflect the toggle immediately - waiting for Save would make the
+            # editor feel broken.
+            self.whitelist.setVisible(value == "true")
         self._update_actions()
 
     def _on_rule_edited(self, rule: GameRule, value: str) -> None:
@@ -304,6 +458,16 @@ class ServerSettingsPanel(QWidget):
 
             outer.addWidget(group)
 
+            # Two controls that aren't properties but belong with their group.
+            if group_name == "Appearance":
+                self.icon_picker = ServerIconPicker()
+                outer.addWidget(self.icon_picker)
+            elif group_name == "Players":
+                self.whitelist = WhitelistEditor()
+                # Only meaningful when the whitelist is actually switched on.
+                self.whitelist.setVisible(False)
+                outer.addWidget(self.whitelist)
+
         self.seed_label = QLabel("World seed: unknown")
         self.seed_label.setStyleSheet(HINT_STYLE)
         self.seed_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -319,6 +483,7 @@ class ServerSettingsPanel(QWidget):
             row.set_value(values.get(key, row.setting.default))
             row.mark_pending(False)
         self.pending_settings.clear()
+        self.whitelist.setVisible(str(values.get("white-list", "false")).lower() == "true")
         self._update_actions()
 
     def set_seed(self, seed: int | None) -> None:

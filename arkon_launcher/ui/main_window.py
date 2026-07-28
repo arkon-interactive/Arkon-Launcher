@@ -12,7 +12,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QImage
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -120,6 +120,8 @@ class MainWindow(QMainWindow):
         # edit made outside the launcher can be noticed rather than clobbered.
         self._properties_snapshot: dict[str, str] = {}
         self._last_drift_reported: list[str] = []
+        # Whitelist additions made while stopped, applied on next start.
+        self._queued_whitelist: set[str] = set()
 
         self._scanning = False
         self._scan_buffer: list[str] = []
@@ -276,6 +278,10 @@ class MainWindow(QMainWindow):
         self.settings_panel.save_requested.connect(self.save_settings)
         self.settings_panel.save_and_restart_requested.connect(self.save_and_restart)
         self.settings_panel.refresh_requested.connect(lambda: self.refresh_settings(force=True))
+        self.settings_panel.whitelist.add_requested.connect(self._whitelist_add)
+        self.settings_panel.whitelist.remove_requested.connect(self._whitelist_remove)
+        self.settings_panel.icon_picker.icon_chosen.connect(self._set_server_icon)
+        self.settings_panel.icon_picker.icon_cleared.connect(self._clear_server_icon)
 
         self.permissions_panel = PermissionsPanel()
         self.permissions_panel.refresh_requested.connect(self.refresh_permissions)
@@ -650,6 +656,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self._auto_op_owner)
             QTimer.singleShot(3000, self.refresh_permissions)
             QTimer.singleShot(4000, self._start_passive_scan)
+            QTimer.singleShot(5000, self._apply_queued_whitelist)
         elif state is ServerState.CRASHED:
             self.console.append_notice(
                 f"Server exited unexpectedly (code {self.server.exit_code if self.server else '?'}).",
@@ -1099,6 +1106,8 @@ class MainWindow(QMainWindow):
         self.settings_panel.set_seed(serversettings.read_world_seed(world.folder))
         self.settings_panel.set_server_running(bool(self.server and self.server.is_alive))
         self.settings_panel.clear_pending()
+        self.settings_panel.icon_picker.set_icon(self._server_icon_path())
+        self._refresh_whitelist()
 
         # What the file looked like when we last agreed with it.
         self._properties_snapshot = dict(properties)
@@ -1106,6 +1115,108 @@ class MainWindow(QMainWindow):
         # Game rules queued for the next start are still outstanding.
         for name in self.pending.game_rules:
             self.settings_panel.mark_rule_pending(name, True)
+
+    # --- Whitelist ---
+
+    def _refresh_whitelist(self) -> None:
+        server_dir = self._server_dir()
+        if server_dir is None:
+            return
+        names = [
+            str(entry.get("name"))
+            for entry in players.read_whitelist(server_dir)
+            if entry.get("name")
+        ]
+        self.settings_panel.whitelist.set_names(
+            names,
+            sorted(self._queued_whitelist),
+            bool(self.server and self.server.is_alive),
+        )
+
+    def _whitelist_add(self, name: str) -> None:
+        """Whitelist someone, including people who have never connected.
+
+        A running server resolves the name against Mojang for us, which is the
+        only reliable way to get their UUID. With the server stopped we queue it
+        rather than writing a UUID-less entry the server would ignore.
+        """
+        if self.server and self.server.is_alive:
+            self._send_command(f"whitelist add {name}")
+            QTimer.singleShot(1200, self._refresh_whitelist)
+        else:
+            self._queued_whitelist.add(name)
+            self.console.append_notice(
+                f"{name} will be whitelisted when the server next starts."
+            )
+            self._refresh_whitelist()
+
+    def _whitelist_remove(self, name: str) -> None:
+        if name in self._queued_whitelist:
+            self._queued_whitelist.discard(name)
+            self._refresh_whitelist()
+            return
+
+        server_dir = self._server_dir()
+        if self.server and self.server.is_alive:
+            self._send_command(f"whitelist remove {name}")
+            QTimer.singleShot(1200, self._refresh_whitelist)
+        elif server_dir is not None:
+            players.set_whitelisted_offline(
+                server_dir, players.KnownPlayer(name=name), False
+            )
+            self._refresh_whitelist()
+
+    def _apply_queued_whitelist(self) -> None:
+        if not self._queued_whitelist or not (self.server and self.server.is_alive):
+            return
+        for name in sorted(self._queued_whitelist):
+            self._send_command(f"whitelist add {name}")
+        self.console.append_notice(
+            f"Whitelisted {len(self._queued_whitelist)} player(s) saved earlier."
+        )
+        self._queued_whitelist.clear()
+        QTimer.singleShot(1500, self._refresh_whitelist)
+
+    # --- Server icon ---
+
+    def _server_icon_path(self):
+        server_dir = self._server_dir()
+        return (server_dir / "server-icon.png") if server_dir else None
+
+    def _set_server_icon(self, source: str) -> None:
+        """Scale whatever they picked into the 64x64 PNG Minecraft requires."""
+        destination = self._server_icon_path()
+        if destination is None:
+            return
+
+        image = QImage(source)
+        if image.isNull():
+            QMessageBox.warning(self, "Server icon", f"Could not read {source}.")
+            return
+
+        scaled = image.scaled(
+            64, 64, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+        ).convertToFormat(QImage.Format_ARGB32)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not scaled.save(str(destination), "PNG"):
+            QMessageBox.warning(self, "Server icon", "Could not write server-icon.png.")
+            return
+
+        self.settings_panel.icon_picker.set_icon(destination)
+        self.console.append_notice(
+            "Server icon updated. Players see it after the server restarts."
+        )
+
+    def _clear_server_icon(self) -> None:
+        destination = self._server_icon_path()
+        if destination and destination.is_file():
+            try:
+                destination.unlink()
+            except OSError as exc:
+                QMessageBox.warning(self, "Server icon", str(exc))
+                return
+        self.settings_panel.icon_picker.set_icon(None)
 
     def _warn_if_drifted(self, on_disk: dict[str, str]) -> None:
         """Tell the user if server.properties was edited outside the launcher."""

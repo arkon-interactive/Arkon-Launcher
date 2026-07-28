@@ -118,7 +118,8 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         "white-list", "Use whitelist", Kind.BOOL, "false", "Players",
-        help="Only whitelisted players can join. Manage the list on the Players tab.",
+        help="Only whitelisted players can join. The list appears below when this "
+             "is on.",
         live_command="whitelist {value}",
         inline_help=True,
     ),

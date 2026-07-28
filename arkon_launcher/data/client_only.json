@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Mod ids that declare `environment: \"*\"` in fabric.mod.json but are really",
+    "client-only, and will crash or misbehave on a dedicated server.",
+    "",
+    "This list is EXPECTED TO BE INCOMPLETE. Fabric's environment field is",
+    "advisory and widely mis-declared, so no static list can cover an arbitrary",
+    "modpack. Mods that declare `client` properly are excluded automatically and",
+    "do not belong here. When crash triage identifies a new one it is appended to",
+    "client_only.user.json in the app's state directory, and good candidates get",
+    "folded back into this file.",
+    "",
+    "Seeded from a real 143-mod Fabric 26.2 pack."
+  ],
+  "client_only": [
+    "ali",
+    "almanac",
+    "betterbiomeblend",
+    "betterfpsdist",
+    "betterstats",
+    "better_client",
+    "bridgingmod",
+    "controlify",
+    "entityculling",
+    "fusion",
+    "gpumemleakfix",
+    "moreculling",
+    "mru",
+    "notenoughanimations",
+    "skinlayers3d",
+    "smoothchunk",
+    "tcdcommons",
+    "trashslot"
+  ]
+}

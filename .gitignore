@@ -1,0 +1,28 @@
+# Build output
+build/
+dist/
+*.spec
+
+# The generated icon - rebuild with `python tools/make_icon.py`
+installer/app.ico
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Scratch
+*.log
+*.tmp

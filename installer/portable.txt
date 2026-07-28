@@ -1,0 +1,15 @@
+This file makes Arkon Launcher run in portable mode.
+
+While it is here, all settings, logs, downloaded server jars and the
+client-only mod list are kept in the "data" folder next to the executable,
+instead of in %LOCALAPPDATA%\Arkon Launcher.
+
+You can move this whole folder anywhere - including a USB drive - and it will
+keep working with your settings intact.
+
+Delete this file if you would rather the app stored its settings in your user
+profile in the normal way.
+
+Note: world backups are never stored here. They live with the Minecraft
+instance they belong to, in a folder called .arkonlauncher, so they stay with
+the worlds they protect.

@@ -11,6 +11,7 @@ Only the public releases API is used, so no token or login is involved.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import urllib.request
@@ -62,8 +63,20 @@ def version_tuple(text: str) -> tuple[int, ...]:
     return tuple(parts[:3])
 
 
-def is_newer(candidate: str, current: str = __version__) -> bool:
-    return version_tuple(candidate) > version_tuple(current)
+def installed_version() -> str:
+    """The version to compare releases against.
+
+    Overridable through ``ARKON_FAKE_VERSION`` so the update path can be tested
+    without waiting for a newer release to exist: set it to something older than
+    what is published and the app will offer the real update, download it, and
+    run the real installer.
+    """
+    override = os.environ.get("ARKON_FAKE_VERSION", "").strip()
+    return override or __version__
+
+
+def is_newer(candidate: str, current: str | None = None) -> bool:
+    return version_tuple(candidate) > version_tuple(current or installed_version())
 
 
 def fetch_latest(timeout: float = 15.0) -> Release | None:

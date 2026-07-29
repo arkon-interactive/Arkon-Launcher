@@ -191,7 +191,7 @@ class MainWindow(QMainWindow):
             if not updater.is_newer(release.version):
                 if announce_when_current:
                     self.console.append_notice(
-                        f"Arkon Launcher {__version__} is the newest version."
+                        f"Arkon Launcher {updater.installed_version()} is the newest version."
                     )
                 return
             self._offer_update(release)
@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("Update available")
         box.setText(
-            f"Arkon Launcher {release.version} is available. You have {__version__}."
+            f"Arkon Launcher {release.version} is available. You have {updater.installed_version()}."
         )
         if notes:
             box.setDetailedText(notes)

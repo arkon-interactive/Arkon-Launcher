@@ -11,6 +11,40 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.7.0
+
+- **Server stats** replace the instance and world pickers once a server is
+  running — tick rate, tick time, uptime, players, CPU, memory and the connect
+  address. Tick rate uses the pack's `/tps` command when it has one and
+  otherwise measures itself from the game's tick counter, which needs no mod at
+  all. **CPU is normalised across cores**, so a server using two of sixteen
+  reads 12% rather than an alarming 200%.
+- **Clicking a player's head opens an action menu** — op and whitelist as
+  toggles that read current state first, kick, ban, game modes — instead of only
+  appending the name.
+- **Custom player actions** are editable in Extra settings, with a placeholder
+  and colour-code reference.
+- **Arkon Essentials update check.** If it's installed, the launcher compares it
+  against the mod's own GitHub releases and offers to replace the jar. Source
+  and javadoc jars are excluded, the download is size-checked and confirmed to
+  contain a `fabric.mod.json` before the old file is removed.
+
+## 0.6.1
+
+- **Fixed a crash when closing the window with the server running.** Three
+  things compounded: `closeEvent` blocked the GUI thread inside `stop()` while
+  the reader thread kept delivering signals into a widget being destroyed; a
+  state change during that could open a modal crash-triage dialog on top; and
+  the window was then destroyed with signals still queued. Callbacks are now
+  detached first and late handlers are guarded.
+- **Leftover servers are found and can be stopped.** A launcher that died
+  mid-stop left a java process holding the world lock and the port, which made
+  the next start fail as though the world were broken — and it was easy to miss
+  among other `java.exe` entries.
+- **Ctrl+click Stop** force quits after a 10 second countdown, for a server that
+  has stopped responding.
+- Stop reads **"Server stopped"** when there is nothing to stop.
+
 ## 0.6.0
 
 - **Auto-update.** Checks GitHub releases on startup and offers a newer version.

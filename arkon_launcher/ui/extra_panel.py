@@ -57,6 +57,8 @@ class ExtraPanel(QWidget):
     restart_schedule_changed = Signal(bool, int)
     restart_announcements_changed = Signal(bool, list)
     restart_countdown_changed = Signal(bool, int)
+    actions_changed = Signal(list)
+    help_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -159,12 +161,93 @@ class ExtraPanel(QWidget):
         restart_layout.addLayout(warn_row)
         restart_layout.addLayout(countdown_row)
 
+        # --- Custom player actions ---
+        self.actions_box = QGroupBox("Custom actions on the player menu")
+
+        self.actions = QListWidget()
+        self.actions.setMaximumHeight(120)
+        self.actions.itemSelectionChanged.connect(self._update_buttons)
+
+        self.action_label = QLineEdit(placeholderText="Label, e.g. Send home")
+        self.action_command = QLineEdit(placeholderText="Command, e.g. tp {player} 0 64 0")
+
+        add_action = QPushButton("Add")
+        add_action.clicked.connect(self._add_action)
+        self.remove_action_button = QPushButton("Remove")
+        self.remove_action_button.clicked.connect(self._remove_action)
+        help_button = QPushButton("Placeholders and colours...")
+        help_button.clicked.connect(self.help_requested.emit)
+
+        action_row = QHBoxLayout()
+        action_row.addWidget(self.action_label, 2)
+        action_row.addWidget(self.action_command, 3)
+        action_row.addWidget(add_action)
+        action_row.addWidget(self.remove_action_button)
+
+        actions_hint = QLabel(
+            "These appear when you click a player's head on the Console tab. "
+            "Use <b>{player}</b> for whoever was clicked."
+        )
+        actions_hint.setWordWrap(True)
+        actions_hint.setStyleSheet(HINT)
+
+        actions_layout = QVBoxLayout(self.actions_box)
+        actions_layout.addWidget(self.actions)
+        actions_layout.addLayout(action_row)
+        actions_layout.addWidget(actions_hint)
+        actions_layout.addWidget(help_button, alignment=Qt.AlignLeft)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.join_box)
+        layout.addWidget(self.actions_box)
         layout.addWidget(self.restart_box)
         layout.addStretch(1)
 
         self._update_buttons()
+
+    # --- Custom actions ---
+
+    def set_actions(self, entries: list[dict]) -> None:
+        self.actions.clear()
+        for entry in entries:
+            label, command = entry.get("label"), entry.get("command")
+            if not label or not command:
+                continue
+            item = QListWidgetItem(f"{label}   -   {command}")
+            item.setData(Qt.UserRole, {"label": label, "command": command})
+            self.actions.addItem(item)
+        if not entries:
+            placeholder = QListWidgetItem("No custom actions yet.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.actions.addItem(placeholder)
+        self._update_buttons()
+
+    def action_entries(self) -> list[dict]:
+        return [
+            self.actions.item(i).data(Qt.UserRole)
+            for i in range(self.actions.count())
+            if self.actions.item(i).data(Qt.UserRole)
+        ]
+
+    def _add_action(self) -> None:
+        label = self.action_label.text().strip()
+        command = self.action_command.text().strip()
+        if not label or not command:
+            return
+        entries = self.action_entries() + [{"label": label, "command": command}]
+        self.action_label.clear()
+        self.action_command.clear()
+        self.set_actions(entries)
+        self.actions_changed.emit(entries)
+
+    def _remove_action(self) -> None:
+        item = self.actions.currentItem()
+        if not item or not item.data(Qt.UserRole):
+            return
+        target = item.data(Qt.UserRole)
+        entries = [e for e in self.action_entries() if e != target]
+        self.set_actions(entries)
+        self.actions_changed.emit(entries)
 
     # --- Settings in/out ---
 
@@ -189,6 +272,7 @@ class ExtraPanel(QWidget):
             widget.blockSignals(False)
 
         self._set_warnings(settings.restart_announcements)
+        self.set_actions(list(settings.custom_player_actions or []))
 
     def _set_warnings(self, seconds: list[int]) -> None:
         self.warnings.clear()
@@ -236,6 +320,9 @@ class ExtraPanel(QWidget):
     def _update_buttons(self) -> None:
         item = self.warnings.currentItem()
         self.remove_button.setEnabled(bool(item and item.data(Qt.UserRole)))
+        action = self.actions.currentItem() if hasattr(self, "actions") else None
+        if hasattr(self, "remove_action_button"):
+            self.remove_action_button.setEnabled(bool(action and action.data(Qt.UserRole)))
 
     def _emit_join(self) -> None:
         self.join_broadcast_changed.emit(

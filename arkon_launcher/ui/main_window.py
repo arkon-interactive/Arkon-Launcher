@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -29,8 +30,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTabWidget,
+    QTextBrowser,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -45,6 +48,7 @@ from .. import (
     crashdoctor,
     instances,
     modsync,
+    modupdater,
     paths,
     players,
     provision,
@@ -54,7 +58,7 @@ from .. import (
 from .. import runner
 from ..runner import ServerConfig, ServerProcess, ServerState, sanitize_jvm_args
 from ..settings import AppSettings, WorldSettings
-from .. import luckperms, permissionnodes, serversettings
+from .. import luckperms, permissionnodes, placeholders, serversettings, serverstats
 from ..serversettings import PendingChanges
 from .config_editor import ConfigEditor
 from .console_view import ConsoleView
@@ -63,6 +67,7 @@ from .extra_panel import ExtraPanel, describe_hours, describe_restart_lead
 from .panels import BackupsPanel, ConnectionPanel, PlayersPanel
 from .permissions_panel import PermissionsPanel
 from .settings_panel import ServerSettingsPanel
+from .stats_panel import ServerStatsPanel
 
 
 class Worker(QThread):
@@ -118,7 +123,15 @@ class MainWindow(QMainWindow):
 
         self._uptime_timer = QTimer(self)
         self._uptime_timer.timeout.connect(self._refresh_status)
+        self._uptime_timer.timeout.connect(self._poll_stats)
         self._uptime_timer.start(1000)
+
+        self._process_sampler = serverstats.ProcessSampler()
+        self._tick_sampler = serverstats.TickSampler()
+        self._tps_countdown = 3
+        self._tps_pending = False
+        # None until we learn whether this pack has a /tps command.
+        self._tps_command_works: bool | None = None
 
         self._backup_timer = QTimer(self)
         self._backup_timer.timeout.connect(self._scheduled_backup)
@@ -156,6 +169,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1500, self.check_for_orphans)
         # Give the window a moment to appear before touching the network.
         QTimer.singleShot(4000, self.check_for_update)
+        QTimer.singleShot(6000, self.check_mod_updates)
 
     # --- Updates ---
 
@@ -181,6 +195,74 @@ class MainWindow(QMainWindow):
                     )
                 return
             self._offer_update(release)
+
+        self._run(work, done)
+
+    def check_mod_updates(self, announce_when_current: bool = False) -> None:
+        """See whether any first-party mod in the pack has a newer release."""
+        if not self.instance:
+            return
+        mods_dir = self.instance.mods_dir
+
+        def work(report):
+            report("Checking for mod updates...")
+            return modupdater.check_for_updates(mods_dir)
+
+        def done(updates):
+            if not updates:
+                if announce_when_current:
+                    self.console.append_notice("All tracked mods are up to date.")
+                return
+            for release, jar, installed in updates:
+                self._offer_mod_update(release, jar, installed)
+
+        self._run(work, done)
+
+    def _offer_mod_update(self, release, old_jar, installed_version: str) -> None:
+        notes = release.notes.strip()
+        if len(notes) > 500:
+            notes = notes[:500] + "..."
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(f"{release.mod.display_name} update")
+        box.setText(
+            f"{release.mod.display_name} {release.version} is available. "
+            f"You have {installed_version}."
+        )
+        box.setInformativeText(
+            f"Download it and replace the installed jar?\n\n"
+            f"  {release.asset_name}\n"
+            f"  {release.asset_size / 1024:.0f} KB\n\n"
+            f"This changes your CurseForge instance, so the Minecraft client "
+            f"gets the new version too."
+        )
+        if notes:
+            box.setDetailedText(notes)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        if box.exec() != QMessageBox.Yes:
+            return
+
+        if self.server and self.server.is_alive:
+            QMessageBox.information(
+                self,
+                "Stop the server first",
+                "The server is running and has the mod file open. Stop it, then "
+                "try the update again.",
+            )
+            return
+
+        mods_dir = self.instance.mods_dir
+
+        def work(report):
+            return modupdater.install_update(release, old_jar, mods_dir, report)
+
+        def done(path):
+            self.console.append_notice(
+                f"Updated {release.mod.display_name} to {release.version} "
+                f"({path.name}). It will be used the next time the server starts."
+            )
 
         self._run(work, done)
 
@@ -381,10 +463,23 @@ class MainWindow(QMainWindow):
         button_row_two.addWidget(self.reload_button)
         button_row_two.addWidget(self.restart_button)
 
+        # Pickers while stopped, health while running: you cannot change world
+        # without stopping, so the pickers are dead weight once it is up.
+        picker = QWidget()
+        picker_layout = QVBoxLayout(picker)
+        picker_layout.setContentsMargins(0, 0, 0, 0)
+        picker_layout.addWidget(instance_group)
+        picker_layout.addWidget(world_group, 1)
+
+        self.stats_panel = ServerStatsPanel()
+
+        self.left_stack = QStackedWidget()
+        self.left_stack.addWidget(picker)
+        self.left_stack.addWidget(self.stats_panel)
+
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        left_layout.addWidget(instance_group)
-        left_layout.addWidget(world_group, 1)
+        left_layout.addWidget(self.left_stack, 1)
         left_layout.addWidget(options_group)
         left_layout.addLayout(button_row)
         left_layout.addLayout(button_row_two)
@@ -417,6 +512,8 @@ class MainWindow(QMainWindow):
             self._on_restart_announcements_changed
         )
         self.extra_panel.restart_countdown_changed.connect(self._on_restart_countdown_changed)
+        self.extra_panel.actions_changed.connect(self._on_custom_actions_changed)
+        self.extra_panel.help_requested.connect(self.show_placeholder_help)
         self.extra_panel.load_settings(self.settings)
 
         self.config_editor = ConfigEditor()
@@ -801,6 +898,16 @@ class MainWindow(QMainWindow):
 
         self.console.set_enabled_for_running(True)
         self._update_buttons()
+
+        world = self.selected_world()
+        if world:
+            self.stats_panel.set_world(world.level_name, instance.mc_version)
+        self.stats_panel.clear()
+        self._tick_sampler.reset()
+        self._tps_command_works = None
+        self._process_sampler.attach(
+            server._process.pid if server._process else None
+        )
         # Work out how friends will connect while the world finishes loading.
         QTimer.singleShot(1500, self.refresh_connection)
 
@@ -1132,8 +1239,42 @@ class MainWindow(QMainWindow):
             menu.exec(QCursor.pos())
 
     def _player_command(self, template: str, name: str) -> None:
-        command = template.replace("{player}", name)
+        world = self.selected_world()
+        properties = self._server_properties()
+        command = placeholders.substitute(
+            template,
+            player=name,
+            world=world.level_name if world else "",
+            online=len(self.server.players) if self.server else 0,
+            max=properties.get("max-players", ""),
+            version=self.instance.mc_version if self.instance else "",
+        )
         self._send_command(command)
+
+    def _on_custom_actions_changed(self, entries: list) -> None:
+        self.settings.custom_player_actions = [
+            {"label": str(e.get("label")), "command": str(e.get("command"))}
+            for e in entries
+            if isinstance(e, dict) and e.get("label") and e.get("command")
+        ]
+        self.settings.save()
+
+    def show_placeholder_help(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Placeholders and colours")
+        dialog.resize(620, 640)
+
+        view = QTextBrowser()
+        view.setHtml(placeholders.help_html())
+        view.setOpenExternalLinks(True)
+
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(view, 1)
+        layout.addWidget(close, alignment=Qt.AlignRight)
+        dialog.exec()
 
     # --- Passive permission scanning ---
 
@@ -2342,6 +2483,88 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self.start_server)
 
         self._run(work, done)
+
+    # --- Live stats ---
+
+    def _poll_stats(self) -> None:
+        """Refresh the stats panel. Runs once a second while the server is up."""
+        if self._shutting_down:
+            return
+        running = bool(self.server and self.server.is_alive)
+        self.left_stack.setCurrentIndex(1 if running else 0)
+        if not running:
+            return
+
+        self.stats_panel.set_uptime(self.server.uptime)
+        self.stats_panel.set_players(
+            len(self.server.players), int(self._server_properties().get("max-players", 0)) or None
+        )
+        self.stats_panel.set_resources(
+            self._process_sampler.sample(), self.memory_spin.value()
+        )
+
+        status = self.connection.status
+        self.stats_panel.set_address(
+            status.friend_address() if status.lan_addresses else "",
+            status.verified if status.lan_addresses else None,
+        )
+
+        # Tick rate is a command round-trip, so it is polled far less often than
+        # the cheap local numbers.
+        self._tps_countdown -= 1
+        if self._tps_countdown <= 0:
+            self._tps_countdown = 5
+            self._measure_tps()
+
+    def _server_properties(self) -> dict:
+        path = self._properties_path()
+        return provision.read_properties(path) if path else {}
+
+    def _measure_tps(self) -> None:
+        """Ask the pack's /tps command, or work it out from the tick counter."""
+        if not (self.server and self.server.is_alive) or self._tps_pending:
+            return
+        self._tps_pending = True
+        server = self.server
+        use_command = self._tps_command_works is not False
+
+        def work(report):
+            if use_command:
+                reply = server.query("tps", settle=0.4, timeout=6)
+                tps, mspt = serverstats.parse_tps(reply)
+                if tps is not None:
+                    return tps, mspt, True
+            # No /tps in this pack - measure it from the game clock instead.
+            ticks = serverstats.parse_gametime(
+                server.query("time query gametime", settle=0.4, timeout=6)
+            )
+            return None, None, False, ticks
+
+        def done(result):
+            self._tps_pending = False
+            if len(result) == 3:
+                tps, mspt, worked = result
+                self._tps_command_works = worked
+                self.stats_panel.set_tps(tps, mspt)
+                return
+            _, _, worked, ticks = result
+            self._tps_command_works = worked
+            measured = self._tick_sampler.sample(ticks)
+            if measured is not None:
+                self.stats_panel.set_tps(measured, None)
+
+        def failed(_):
+            self._tps_pending = False
+
+        worker = Worker(work, self)
+        self._workers.append(worker)
+        worker.finished_ok.connect(done)
+        worker.failed.connect(failed)
+        worker.finished.connect(
+            lambda: self._workers.remove(worker) if worker in self._workers else None
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def _refresh_status(self) -> None:
         if self.server and self.server.is_alive:

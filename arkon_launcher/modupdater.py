@@ -12,6 +12,7 @@ would be undone by the next launch.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import urllib.request
@@ -112,6 +113,208 @@ def latest_release(mod: TrackedMod, timeout: float = 15.0) -> ModRelease | None:
             asset_size=int(asset.get("size") or 0),
         )
     return None
+
+
+# --- CurseForge updates ------------------------------------------------------
+#
+# The CurseForge app records, for every mod it installed, both the file that is
+# installed and the newest file available - in minecraftinstance.json, with a
+# direct download URL. That means updates for the whole pack can be found with
+# no API key and no network call at all.
+#
+# The catch is freshness: latestFile is only as current as the last time the
+# CurseForge app refreshed the instance. It is a good signal, not an oracle, and
+# the UI says so.
+
+
+@dataclass
+class CurseForgeUpdate:
+    addon_id: int
+    name: str
+    installed_file: str
+    installed_id: int
+    latest_file: str
+    latest_id: int
+    download_url: str
+    size: int
+    sha1: str
+    jar_path: Path | None = None
+
+    @property
+    def has_download(self) -> bool:
+        return bool(self.download_url)
+
+
+def _hash_of(file_entry: dict, kind: int = 1) -> str:
+    """CurseForge hash types: 1 is SHA1, 2 is MD5."""
+    for entry in file_entry.get("hashes") or []:
+        if entry.get("type") == kind:
+            return str(entry.get("value") or "")
+    return ""
+
+
+def read_instance_manifest(instance_dir: Path) -> dict:
+    try:
+        with open(Path(instance_dir) / "minecraftinstance.json", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def curseforge_updates(
+    instance_dir: Path, mods_dir: Path, require_present: bool = True
+) -> list[CurseForgeUpdate]:
+    """Mods CurseForge believes have a newer file than the one installed.
+
+    ``require_present`` skips entries whose jar is not actually in the folder.
+    The manifest can list a mod that has since been removed by hand, and
+    "updating" that would silently reinstall something deliberately deleted -
+    which is not an update, it is a resurrection.
+    """
+    manifest = read_instance_manifest(instance_dir)
+    mods_dir = Path(mods_dir)
+    updates: list[CurseForgeUpdate] = []
+
+    for addon in manifest.get("installedAddons") or []:
+        installed = addon.get("installedFile") or {}
+        latest = addon.get("latestFile") or {}
+        if not installed or not latest:
+            continue
+
+        installed_id = installed.get("id")
+        latest_id = latest.get("id")
+        if not installed_id or not latest_id or installed_id == latest_id:
+            continue
+
+        jar_name = installed.get("fileName") or installed.get("fileNameOnDisk") or ""
+        jar_path = mods_dir / jar_name if jar_name else None
+        present = bool(jar_path and jar_path.is_file())
+        if require_present and not present:
+            continue
+
+        updates.append(
+            CurseForgeUpdate(
+                addon_id=int(addon.get("addonID") or 0),
+                name=str(addon.get("name") or jar_name or "Unknown mod"),
+                installed_file=jar_name,
+                installed_id=int(installed_id),
+                latest_file=str(latest.get("fileName") or ""),
+                latest_id=int(latest_id),
+                download_url=str(latest.get("downloadUrl") or ""),
+                size=int(latest.get("fileLength") or 0),
+                sha1=_hash_of(latest, 1),
+                jar_path=jar_path if jar_path and jar_path.is_file() else None,
+            )
+        )
+
+    updates.sort(key=lambda u: u.name.lower())
+    return updates
+
+
+def apply_curseforge_update(
+    update: CurseForgeUpdate,
+    instance_dir: Path,
+    mods_dir: Path,
+    on_progress: ProgressCallback | None = None,
+) -> Path:
+    """Download the newer jar, swap it in, and keep the manifest honest.
+
+    The manifest is updated too, because CurseForge reads it to decide what is
+    installed - leaving it stale would have the app offer the same update
+    forever, or quietly put the old file back. It is backed up first.
+    """
+    mods_dir = Path(mods_dir)
+    if not update.has_download:
+        raise ModUpdateError(
+            f"CurseForge did not provide a download link for {update.name}. "
+            f"Its author may have disabled third-party downloads."
+        )
+
+    destination = mods_dir / (update.latest_file or f"{update.addon_id}.jar")
+    partial = destination.with_suffix(".jar.part")
+
+    request = urllib.request.Request(
+        update.download_url, headers={"User-Agent": "ArkonLauncher"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response, open(
+            partial, "wb"
+        ) as out:
+            done = 0
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if on_progress and update.size:
+                    on_progress(f"{update.name}... {done * 100 // update.size}%")
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise ModUpdateError(f"Could not download {update.name}: {exc}") from exc
+
+    if update.size and partial.stat().st_size != update.size:
+        partial.unlink(missing_ok=True)
+        raise ModUpdateError(f"{update.name} downloaded at the wrong size; discarded.")
+
+    if update.sha1:
+        digest = hashlib.sha1()
+        with open(partial, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest().lower() != update.sha1.lower():
+            partial.unlink(missing_ok=True)
+            raise ModUpdateError(f"{update.name} failed its checksum; discarded.")
+
+    # Only remove the old jar once the new one is verified.
+    if update.jar_path and update.jar_path.is_file():
+        if update.jar_path.resolve() != destination.resolve():
+            try:
+                update.jar_path.unlink()
+            except OSError as exc:
+                partial.unlink(missing_ok=True)
+                raise ModUpdateError(
+                    f"Could not remove {update.jar_path.name} ({exc}). "
+                    f"Is the server or Minecraft running?"
+                ) from exc
+
+    partial.replace(destination)
+    _mark_installed(instance_dir, update)
+    return destination
+
+
+def _mark_installed(instance_dir: Path, update: CurseForgeUpdate) -> None:
+    """Record the new file as the installed one in CurseForge's manifest."""
+    path = Path(instance_dir) / "minecraftinstance.json"
+    manifest = read_instance_manifest(instance_dir)
+    if not manifest:
+        return
+
+    changed = False
+    for addon in manifest.get("installedAddons") or []:
+        if int(addon.get("addonID") or 0) != update.addon_id:
+            continue
+        latest = addon.get("latestFile")
+        if latest:
+            addon["installedFile"] = latest
+            addon["fileNameOnDisk"] = latest.get("fileName") or addon.get("fileNameOnDisk")
+            changed = True
+        break
+
+    if not changed:
+        return
+
+    backup = path.with_suffix(".json.arkonbak")
+    try:
+        if path.is_file() and not backup.is_file():
+            backup.write_bytes(path.read_bytes())
+        temporary = path.with_suffix(".json.tmp")
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2)
+        temporary.replace(path)
+    except OSError:
+        # A stale manifest is survivable; a broken one is not, so leave it be.
+        pass
 
 
 def check_for_updates(mods_dir: Path) -> list[tuple[ModRelease, Path, str]]:

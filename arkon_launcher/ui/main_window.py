@@ -237,17 +237,151 @@ class MainWindow(QMainWindow):
                     }
                 )
             rows.sort(key=lambda r: r["name"].lower())
-            return rows
 
-        self._run(work, self.mods_panel.set_mods)
+            # Reuse the jars already parsed above rather than reading all
+            # 140 of them a second time.
+            duplicates = modsync.duplicates_in(result.included + result.excluded)
+            updates = {
+                u.installed_file: u
+                for u in modupdater.curseforge_updates(instance.directory, instance.mods_dir)
+            }
+            for row in rows:
+                row["update"] = updates.get(row["file"])
 
-    def _edit_config_from_mods(self, path) -> None:
-        """Jump from a mod straight to editing its config."""
-        if not self.instance:
+            return {
+                "rows": rows,
+                "duplicates": duplicates,
+                "updates": {k: v for k, v in updates.items()},
+            }
+
+        def done(payload):
+            self.mods_panel.set_mods(payload)
+            self.mods_panel.set_config_root(instance.config_dir)
+            self._set_mods_badge(len(payload["updates"]))
+
+        self._run(work, done)
+
+    def _set_mods_badge(self, count: int) -> None:
+        """Show the number of available updates on the Mods tab itself."""
+        index = self.tabs.indexOf(self.mods_panel)
+        if index >= 0:
+            self.tabs.setTabText(index, f"Mods ({count})" if count else "Mods")
+
+    def _mods_busy_guard(self) -> bool:
+        """Refuse to touch mod files while something has them open."""
+        if self.server and self.server.is_alive:
+            QMessageBox.information(
+                self,
+                "Stop the server first",
+                "The server has the mod files open. Stop it before changing mods.",
+            )
+            return False
+        return True
+
+    def _apply_mod_update(self, update) -> None:
+        if not self.instance or not self._mods_busy_guard():
             return
-        self.tabs.setCurrentWidget(self.config_editor)
-        self.config_editor.set_root(self.instance.config_dir)
-        self.config_editor.select_file(Path(path))
+
+        answer = QMessageBox.question(
+            self,
+            f"Update {update.name}?",
+            f"{update.installed_file}\n->\n{update.latest_file}\n\n"
+            f"{update.size / 1024:,.0f} KB. This changes your CurseForge instance, "
+            f"so the Minecraft client gets the new version too.\n\nUpdate now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._run_mod_updates([update])
+
+    def _apply_all_mod_updates(self) -> None:
+        if not self.instance or not self._mods_busy_guard():
+            return
+        updates = list(self.mods_panel._updates.values())
+        if not updates:
+            return
+
+        listing = "\n".join(f"  {u.name}: {u.installed_file} -> {u.latest_file}" for u in updates[:12])
+        more = f"\n  ...and {len(updates) - 12} more" if len(updates) > 12 else ""
+        total = sum(u.size for u in updates)
+        answer = QMessageBox.question(
+            self,
+            f"Update {len(updates)} mod(s)?",
+            f"{listing}{more}\n\nAbout {total / 1024**2:.1f} MB in total.\n\n"
+            f"This changes your CurseForge instance. Update all now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._run_mod_updates(updates)
+
+    def _run_mod_updates(self, updates: list) -> None:
+        instance = self.instance
+
+        def work(report):
+            done, failed = [], []
+            for update in updates:
+                try:
+                    report(f"Updating {update.name}...")
+                    modupdater.apply_curseforge_update(
+                        update, instance.directory, instance.mods_dir, report
+                    )
+                    done.append(update)
+                except modupdater.ModUpdateError as exc:
+                    failed.append((update, str(exc)))
+            return done, failed
+
+        def finished(result):
+            done, failed = result
+            for update in done:
+                self.console.append_notice(
+                    f"Updated {update.name} to {update.latest_file}."
+                )
+            for update, reason in failed:
+                self.console.append_notice(f"{update.name}: {reason}", "#ff6b6b")
+            if done:
+                self.console.append_notice(
+                    "Updated mods are used the next time the server starts."
+                )
+            self.refresh_mods()
+
+        self._run(work, finished)
+
+    def _fix_duplicate(self, mod_id: str, keep, discard: list) -> None:
+        if not self._mods_busy_guard():
+            return
+
+        names = "\n".join(f"  {jar.name}" for jar in discard)
+        answer = QMessageBox.question(
+            self,
+            f"Disable {len(discard)} copy of {mod_id}?" if len(discard) == 1
+            else f"Disable {len(discard)} copies of {mod_id}?",
+            f"Keeping:\n  {keep.name}\n\nRenaming to .jar.disabled:\n{names}\n\n"
+            f"Nothing is deleted - rename them back to undo.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        def work(report):
+            moved = []
+            for jar in discard:
+                try:
+                    report(f"Disabling {jar.name}...")
+                    moved.append(modsync.disable_jar(jar.path))
+                except OSError as exc:
+                    self.console.append_notice(f"{jar.name}: {exc}", "#ff6b6b")
+            return moved
+
+        def finished(moved):
+            for path in moved:
+                self.console.append_notice(f"Disabled {Path(path).name}.")
+            self.refresh_mods()
+
+        self._run(work, finished)
 
     def check_mod_updates(self, announce_when_current: bool = False) -> None:
         """See whether any first-party mod in the pack has a newer release."""
@@ -585,15 +719,16 @@ class MainWindow(QMainWindow):
         self.extra_panel.help_requested.connect(self.show_placeholder_help)
         self.extra_panel.load_settings(self.settings)
 
-        self.config_editor = ConfigEditor()
-        self.config_editor.save_requested.connect(self._save_config_file)
-
         self.mods_panel = ModsPanel()
         self.mods_panel.refresh_requested.connect(self.refresh_mods)
         self.mods_panel.check_updates_requested.connect(
             lambda: self.check_mod_updates(announce_when_current=True)
         )
-        self.mods_panel.edit_config.connect(self._edit_config_from_mods)
+        self.mods_panel.save_config.connect(self._save_config_file)
+        self.mods_panel.update_one.connect(self._apply_mod_update)
+        self.mods_panel.update_all.connect(self._apply_all_mod_updates)
+        self.mods_panel.fix_duplicate.connect(self._fix_duplicate)
+        self.config_editor = self.mods_panel.config_editor
 
         self.settings_panel = ServerSettingsPanel()
         self.settings_panel.save_requested.connect(self.save_settings)
@@ -648,7 +783,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.players_panel, "Players")
         self.tabs.addTab(self.permissions_panel, "Permissions")
         self.tabs.addTab(self.mods_panel, "Mods")
-        self.tabs.addTab(self.config_editor, "Config files")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -2424,8 +2558,6 @@ class MainWindow(QMainWindow):
             self.refresh_permissions()
         elif widget is self.mods_panel:
             self.refresh_mods()
-        elif widget is self.config_editor and self.instance:
-            self.config_editor.set_root(self.instance.config_dir)
         elif widget is self.connection_panel and not self.connection.status.lan_addresses:
             self.refresh_connection()
 

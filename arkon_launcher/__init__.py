@@ -1,4 +1,4 @@
 """Arkon Launcher - run a CurseForge Minecraft instance as a dedicated Fabric server."""
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 APP_NAME = "Arkon Launcher"

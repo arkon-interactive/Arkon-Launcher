@@ -556,6 +556,57 @@ CONFIG_SUFFIXES = {
 }
 
 
+def duplicates_in(mods: list[ModJar]) -> dict[str, list[ModJar]]:
+    """Mod ids appearing more than once, newest version first.
+
+    Takes an already-read list rather than re-scanning: parsing a jar means
+    opening it and every jar nested inside it, so doing that twice over a
+    140-mod pack is several seconds of pointless work.
+
+    Fabric refuses to start with two jars claiming the same id, so duplicates
+    are not untidiness - they stop the server.
+    """
+    by_id: dict[str, list[ModJar]] = {}
+    for mod in mods:
+        if not mod.mod_id or mod.excluded_by is Exclusion.UNREADABLE:
+            continue
+        by_id.setdefault(mod.mod_id, []).append(mod)
+
+    return {
+        mod_id: sorted(jars, key=lambda m: version_key(m.version), reverse=True)
+        for mod_id, jars in by_id.items()
+        if len(jars) > 1
+    }
+
+
+def find_duplicates(mods_dir: Path) -> dict[str, list[ModJar]]:
+    """Convenience wrapper that reads the folder first."""
+    mods_dir = Path(mods_dir)
+    if not mods_dir.is_dir():
+        return {}
+    return duplicates_in([read_mod_jar(p) for p in sorted(mods_dir.glob("*.jar"))])
+
+
+DISABLED_SUFFIX = ".disabled"
+
+
+def disable_jar(jar_path: Path) -> Path:
+    """Rename a jar out of the way rather than deleting it.
+
+    `.jar.disabled` is CurseForge's own convention, so the app understands it
+    and the file can be brought back by renaming - which matters when the guess
+    about which version to keep turns out to be wrong.
+    """
+    jar_path = Path(jar_path)
+    destination = jar_path.with_suffix(jar_path.suffix + DISABLED_SUFFIX)
+    counter = 1
+    while destination.exists():
+        destination = jar_path.with_suffix(f"{jar_path.suffix}{DISABLED_SUFFIX}.{counter}")
+        counter += 1
+    jar_path.rename(destination)
+    return destination
+
+
 def find_mod_configs(mod_id: str, config_dir: Path, limit: int = 12) -> list[Path]:
     """Config files that appear to belong to a mod.
 

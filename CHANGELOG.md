@@ -11,6 +11,28 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.9.0
+
+- **Updates for every mod, not just first-party ones.** CurseForge's own
+  manifest records the newest available file for each mod it installed, with a
+  direct download link — so the whole pack can be checked with no API key and no
+  network call. Update one at a time or all at once; the Mods tab shows a count
+  in its label. Downloads are size- and SHA1-checked before the old jar is
+  removed, and the manifest is updated so CurseForge stays consistent.
+- Mods listed in the manifest whose jar is no longer present are **skipped**
+  rather than offered — reinstalling something deliberately deleted is not an
+  update.
+- **Duplicate cleanup.** Mods installed twice are flagged with a count, and you
+  choose which version to keep. The others are renamed to `.jar.disabled`
+  — CurseForge's own convention — rather than deleted, so it can be undone.
+- **The config editor now lives in the Mods tab**, with a Configure button that
+  scopes it to the selected mod's files. Browsing all config files is still
+  possible. The separate Config files tab is gone.
+- **Fixed** two bugs where a sorted table was addressed by source-row index:
+  searching hid the wrong rows, and selecting a mod could return a different
+  one. Both showed up precisely on duplicated mods, which is the case the
+  feature exists for.
+
 ## 0.8.0
 
 - **Mods tab.** Every installed mod with its version, which side it declares,

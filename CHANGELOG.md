@@ -11,6 +11,23 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.10.0
+
+- **Turn mods on and off.** Disabled mods now appear in the list marked "(off)"
+  instead of vanishing, and can be switched back on. Uses the `.jar.disabled`
+  convention, so CurseForge understands it and nothing is deleted.
+- **Install and uninstall mods by hand**, for anything that did not come from
+  CurseForge. Installing validates the jar really is a Fabric mod *before*
+  copying — a non-mod jar in the folder stops the whole pack loading with an
+  error that names a file rather than explaining anything — and warns if what
+  you added is client-only. Uninstall offers "Disable instead" as the default,
+  since that is reversible.
+- **Older duplicates are highlighted** and marked "(older copy)", with a
+  "Disable this copy" button next to the update button, so the two obvious
+  responses sit side by side.
+- Mod names are plain ASCII in the table. A warning glyph looked better but
+  cannot be encoded to cp1252, and mod names reach the console and log files.
+
 ## 0.9.0
 
 - **Updates for every mod, not just first-party ones.** CurseForge's own

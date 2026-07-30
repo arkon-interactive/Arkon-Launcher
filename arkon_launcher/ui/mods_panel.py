@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -100,6 +101,9 @@ class ModsPanel(QWidget):
     update_all = Signal()
     fix_duplicate = Signal(str, object, list)  # mod_id, keep, discard
     save_config = Signal(object, str, bool)
+    toggle_mod = Signal(object, bool)  # row, enable
+    install_mod = Signal(str)
+    uninstall_mod = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -155,12 +159,32 @@ class ModsPanel(QWidget):
         self.update_one_button.clicked.connect(self._update_selected)
         self.update_one_button.setEnabled(False)
 
+        self.toggle_button = QPushButton("Disable")
+        self.toggle_button.clicked.connect(self._toggle_selected)
+        self.toggle_button.setEnabled(False)
+        self.toggle_button.setToolTip(
+            "Switches the mod off by renaming it to .jar.disabled. Nothing is "
+            "deleted, and it can be switched back on here."
+        )
+
+        self.uninstall_button = QPushButton("Uninstall")
+        self.uninstall_button.clicked.connect(self._uninstall_selected)
+        self.uninstall_button.setEnabled(False)
+
+        install = QPushButton("Install mod...")
+        install.clicked.connect(self._install)
+        install.setToolTip("Add a Fabric mod jar that did not come from CurseForge.")
+
         self.show_all_configs = QPushButton("Browse all config files")
         self.show_all_configs.clicked.connect(self._show_all_configs)
 
         row_actions = QHBoxLayout()
         row_actions.addWidget(self.configure_button)
         row_actions.addWidget(self.update_one_button)
+        row_actions.addWidget(self.toggle_button)
+        row_actions.addWidget(self.uninstall_button)
+        row_actions.addSpacing(12)
+        row_actions.addWidget(install)
         row_actions.addStretch(1)
         row_actions.addWidget(self.show_all_configs)
 
@@ -209,12 +233,24 @@ class ModsPanel(QWidget):
         self.table.setRowCount(len(rows))
 
         for index, row in enumerate(rows):
-            name = QTableWidgetItem(row["name"])
+            # Plain ASCII rather than warning glyphs: mod names end up in the
+            # console and in log files, and a cp1252 stream cannot encode them.
+            label = row["name"]
+            if row.get("is_duplicate"):
+                label = f"{label}  (older copy)"
+            elif row.get("disabled"):
+                label = f"{label}  (off)"
+
+            name = QTableWidgetItem(label)
             name.setToolTip(f"{row['mod_id']}\n{row['file']}")
             # Carry the source index on the item. Matching rows back by name
             # breaks exactly where it matters - a duplicated mod appears twice
             # under the same name, and only one of them has the update.
             name.setData(Qt.UserRole, index)
+            if row.get("is_duplicate"):
+                name.setForeground(Qt.yellow)
+            elif row.get("disabled"):
+                name.setForeground(Qt.gray)
             self.table.setItem(index, COLUMN_MOD, name)
             self.table.setItem(index, COLUMN_VERSION, QTableWidgetItem(row["version"] or "-"))
 
@@ -322,6 +358,18 @@ class ModsPanel(QWidget):
         row = self._selected_row()
         self.configure_button.setEnabled(bool(row and row["configs"]))
         self.update_one_button.setEnabled(bool(row and row.get("update")))
+        self.uninstall_button.setEnabled(row is not None)
+
+        self.toggle_button.setEnabled(row is not None)
+        if row and row.get("disabled"):
+            self.toggle_button.setText("Enable")
+        elif row and row.get("is_duplicate"):
+            # The common thing to do with an older duplicate is switch it off,
+            # so say that rather than the generic label.
+            self.toggle_button.setText("Disable this copy")
+        else:
+            self.toggle_button.setText("Disable")
+
         if row and row["configs"]:
             self.configure_button.setText(f"Configure {row['name'][:22]}")
         else:
@@ -358,6 +406,23 @@ class ModsPanel(QWidget):
         row = self._selected_row()
         if row and row.get("update"):
             self.update_one.emit(row["update"])
+
+    def _toggle_selected(self) -> None:
+        row = self._selected_row()
+        if row:
+            self.toggle_mod.emit(row, bool(row.get("disabled")))
+
+    def _uninstall_selected(self) -> None:
+        row = self._selected_row()
+        if row:
+            self.uninstall_mod.emit(row)
+
+    def _install(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Choose a Fabric mod jar", "", "Mod jars (*.jar)"
+        )
+        if chosen:
+            self.install_mod.emit(chosen)
 
     def _fix_duplicates(self) -> None:
         for mod_id, jars in list(self._duplicates.items()):

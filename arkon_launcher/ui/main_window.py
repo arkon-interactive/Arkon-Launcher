@@ -218,8 +218,18 @@ class MainWindow(QMainWindow):
                 if world_settings
                 else set(),
             )
+            disabled = modsync.read_disabled_jars(instance.mods_dir)
+            duplicates = modsync.duplicates_in(result.included + result.excluded)
+            # Every copy except the newest of a duplicated id is the one
+            # worth warning about.
+            older = {
+                jar.path
+                for jars in duplicates.values()
+                for jar in jars[1:]
+            }
+
             rows = []
-            for mod in result.included + result.excluded:
+            for mod in result.included + result.excluded + disabled:
                 rows.append(
                     {
                         "mod_id": mod.mod_id or "",
@@ -231,6 +241,9 @@ class MainWindow(QMainWindow):
                         "detail": mod.detail,
                         "notable": mod.excluded_by in NOTABLE_EXCLUSIONS,
                         "file": mod.name,
+                        "path": mod.path,
+                        "disabled": modsync.is_disabled(mod.path),
+                        "is_duplicate": mod.path in older,
                         "configs": modsync.find_mod_configs(
                             mod.mod_id or "", instance.config_dir
                         ),
@@ -238,9 +251,6 @@ class MainWindow(QMainWindow):
                 )
             rows.sort(key=lambda r: r["name"].lower())
 
-            # Reuse the jars already parsed above rather than reading all
-            # 140 of them a second time.
-            duplicates = modsync.duplicates_in(result.included + result.excluded)
             updates = {
                 u.installed_file: u
                 for u in modupdater.curseforge_updates(instance.directory, instance.mods_dir)
@@ -348,6 +358,92 @@ class MainWindow(QMainWindow):
             self.refresh_mods()
 
         self._run(work, finished)
+
+    def _toggle_mod(self, row: dict, enable: bool) -> None:
+        """Switch a mod on or off by renaming it, never by deleting it."""
+        if not self._mods_busy_guard():
+            return
+        path = Path(row["path"])
+
+        def work(report):
+            if enable:
+                report(f"Enabling {row['name']}...")
+                return modsync.enable_jar(path), True
+            report(f"Disabling {row['name']}...")
+            return modsync.disable_jar(path), False
+
+        def done(result):
+            new_path, enabled = result
+            self.console.append_notice(
+                f"{'Enabled' if enabled else 'Disabled'} {row['name']} "
+                f"({Path(new_path).name}). Takes effect next time the server starts."
+            )
+            self.refresh_mods()
+
+        self._run(work, done)
+
+    def _install_mod(self, source: str) -> None:
+        if not self.instance or not self._mods_busy_guard():
+            return
+        mods_dir = self.instance.mods_dir
+
+        def work(report):
+            report(f"Installing {Path(source).name}...")
+            return modsync.install_mod(Path(source), mods_dir)
+
+        def done(result):
+            path, mod = result
+            self.console.append_notice(
+                f"Installed {mod.display_name or mod.mod_id} {mod.version or ''} "
+                f"({Path(path).name})."
+            )
+            if mod.environment == "client":
+                self.console.append_notice(
+                    f"{mod.display_name or mod.mod_id} is client-only, so it will not "
+                    f"be loaded on the server.",
+                    "#ffa94d",
+                )
+            self.refresh_mods()
+
+        self._run(work, done)
+
+    def _uninstall_mod(self, row: dict) -> None:
+        if not self._mods_busy_guard():
+            return
+
+        path = Path(row["path"])
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(f"Uninstall {row['name']}?")
+        box.setText(f"Delete {path.name}?")
+        box.setInformativeText(
+            "This cannot be undone. Disabling it instead keeps the file and can "
+            "be reversed.\n\n"
+            "Removing a mod other mods depend on will stop the pack loading."
+        )
+        disable = box.addButton("Disable instead", QMessageBox.AcceptRole)
+        delete = box.addButton("Delete", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(disable)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is disable:
+            self._toggle_mod(row, enable=False)
+            return
+        if clicked is not delete:
+            return
+
+        def work(report):
+            report(f"Removing {path.name}...")
+            modsync.uninstall_mod(path)
+            return path
+
+        def done(removed):
+            self.console.append_notice(f"Deleted {Path(removed).name}.")
+            self.refresh_mods()
+
+        self._run(work, done)
 
     def _fix_duplicate(self, mod_id: str, keep, discard: list) -> None:
         if not self._mods_busy_guard():
@@ -728,6 +824,9 @@ class MainWindow(QMainWindow):
         self.mods_panel.update_one.connect(self._apply_mod_update)
         self.mods_panel.update_all.connect(self._apply_all_mod_updates)
         self.mods_panel.fix_duplicate.connect(self._fix_duplicate)
+        self.mods_panel.toggle_mod.connect(self._toggle_mod)
+        self.mods_panel.install_mod.connect(self._install_mod)
+        self.mods_panel.uninstall_mod.connect(self._uninstall_mod)
         self.config_editor = self.mods_panel.config_editor
 
         self.settings_panel = ServerSettingsPanel()

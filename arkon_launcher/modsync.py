@@ -590,6 +590,80 @@ def find_duplicates(mods_dir: Path) -> dict[str, list[ModJar]]:
 DISABLED_SUFFIX = ".disabled"
 
 
+def is_disabled(path: Path) -> bool:
+    return str(path).lower().endswith(f".jar{DISABLED_SUFFIX}")
+
+
+def read_disabled_jars(mods_dir: Path) -> list[ModJar]:
+    """Mods that are present but switched off.
+
+    They are excluded from the server build, but the user still needs to see
+    them - a mod you turned off last month is invisible otherwise, and looks
+    like it was lost.
+    """
+    mods_dir = Path(mods_dir)
+    if not mods_dir.is_dir():
+        return []
+
+    found: list[ModJar] = []
+    for path in sorted(mods_dir.glob(f"*.jar{DISABLED_SUFFIX}")):
+        mod = read_mod_jar(path)
+        mod.excluded_by = Exclusion.USER_DISABLED
+        mod.detail = "switched off in the Mods tab"
+        found.append(mod)
+    return found
+
+
+def enable_jar(jar_path: Path) -> Path:
+    """Turn a disabled mod back on by removing the .disabled suffix."""
+    jar_path = Path(jar_path)
+    if not is_disabled(jar_path):
+        return jar_path
+
+    destination = jar_path.with_name(jar_path.name[: -len(DISABLED_SUFFIX)])
+    if destination.exists():
+        raise FileExistsError(
+            f"{destination.name} already exists - the mod is enabled already."
+        )
+    jar_path.rename(destination)
+    return destination
+
+
+def install_mod(source: Path, mods_dir: Path) -> tuple[Path, ModJar]:
+    """Copy a jar into the mods folder after checking it really is one.
+
+    Validated before copying rather than after: a non-mod jar dropped in the
+    folder stops the whole pack loading, and the error names a file rather than
+    explaining what went wrong.
+    """
+    source = Path(source)
+    mods_dir = Path(mods_dir)
+
+    if not source.is_file():
+        raise FileNotFoundError(f"{source} does not exist.")
+
+    mod = read_mod_jar(source)
+    if mod.excluded_by is Exclusion.UNREADABLE or not mod.mod_id:
+        raise ValueError(
+            f"{source.name} does not look like a Fabric mod - it has no "
+            f"fabric.mod.json. Forge and NeoForge mods will not work here."
+        )
+
+    mods_dir.mkdir(parents=True, exist_ok=True)
+    destination = mods_dir / source.name
+    if destination.exists():
+        raise FileExistsError(f"{destination.name} is already in the mods folder.")
+
+    shutil.copy2(source, destination)
+    installed = read_mod_jar(destination)
+    return destination, installed
+
+
+def uninstall_mod(jar_path: Path) -> None:
+    """Delete a mod jar. Callers are expected to have confirmed first."""
+    Path(jar_path).unlink()
+
+
 def disable_jar(jar_path: Path) -> Path:
     """Rename a jar out of the way rather than deleting it.
 

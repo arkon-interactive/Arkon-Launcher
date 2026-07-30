@@ -8,6 +8,7 @@ the GUI thread by a queued signal. Nothing blocking runs in an event handler.
 from __future__ import annotations
 
 import os
+import time
 import traceback
 from pathlib import Path
 
@@ -58,14 +59,15 @@ from .. import (
 from .. import runner
 from ..runner import ServerConfig, ServerProcess, ServerState, sanitize_jvm_args
 from ..settings import AppSettings, WorldSettings
-from .. import luckperms, permissionnodes, placeholders, serversettings, serverstats
+from .. import essentials, luckperms, permissionnodes, placeholders, serversettings, serverstats
 from ..serversettings import PendingChanges
 from .config_editor import ConfigEditor
 from .console_view import ConsoleView
 from .countdown_button import CountdownButton
 from .extra_panel import ExtraPanel, describe_hours, describe_restart_lead
 from .mods_panel import NOTABLE as NOTABLE_EXCLUSIONS, ModsPanel
-from .panels import BackupsPanel, ConnectionPanel, PlayersPanel
+from .panels import BackupsPanel, ConnectionPanel
+from .players_panel import PlayersPanel
 from .permissions_panel import PermissionsPanel
 from .settings_panel import ServerSettingsPanel
 from .stats_panel import ServerStatsPanel
@@ -154,6 +156,12 @@ class MainWindow(QMainWindow):
         self._avatars_requested: set[str] = set()
         # Set once the window starts closing, so late callbacks stay quiet.
         self._shutting_down = False
+        # name -> join time, for session length. Only known for people who
+        # joined while the launcher was watching.
+        self._player_sessions: dict[str, float] = {}
+        # Per-player facts only Arkon Essentials can provide.
+        self._player_telemetry: dict = {}
+        self._essentials_abilities: list = []
 
         self._scanning = False
         self._scan_buffer: list[str] = []
@@ -792,9 +800,16 @@ class MainWindow(QMainWindow):
         self.connection_panel.playit_requested.connect(self.setup_playit)
 
         self.players_panel = PlayersPanel()
-        self.players_panel.op_toggled.connect(self._set_op)
-        self.players_panel.whitelist_toggled.connect(self._set_whitelisted)
-        self.players_panel.kick_requested.connect(self._kick_player)
+        self.players_panel.player_selected.connect(self._on_player_selected)
+        detail = self.players_panel.detail
+        detail.op_toggled.connect(self._set_op)
+        detail.whitelist_toggled.connect(self._set_whitelisted)
+        detail.ban_toggled.connect(self._set_banned)
+        detail.kick_requested.connect(self._kick_player)
+        detail.group_added.connect(self._add_user_to_group)
+        detail.group_removed.connect(self._remove_user_from_group)
+        detail.permission_set.connect(self._set_user_permission)
+        detail.permission_unset.connect(self._unset_user_permission)
 
         self.backups_panel = BackupsPanel()
         self.backups_panel.backup_requested.connect(self.backup_now)
@@ -980,6 +995,9 @@ class MainWindow(QMainWindow):
         )
         self.settings.last_instance = str(instance.directory)
         self.settings.save()
+        # Abilities come from a resource in the mod jar, so this works with
+        # the server stopped and costs nothing when the mod is absent.
+        self._essentials_abilities = essentials.read_abilities(instance.mods_dir)
         self.load_worlds()
 
     def load_worlds(self) -> None:
@@ -1595,6 +1613,13 @@ class MainWindow(QMainWindow):
         the console they would bury everything else - so while a scan is running
         they are collected for node extraction and never displayed.
         """
+        # Telemetry from Arkon Essentials is data, not reading material.
+        if essentials.is_telemetry(line):
+            payload = essentials.parse_telemetry(line)
+            if payload:
+                for row in essentials.players_from_telemetry(payload):
+                    self._player_telemetry[row.name] = row
+            return
         if self._scanning and permissionnodes.is_verbose_line(line):
             self._scan_buffer.append(line)
             # Bounded: a long session must not accumulate without limit. Older
@@ -1755,16 +1780,139 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1500, self.refresh_players)
 
     def refresh_players(self) -> None:
+        """Rebuild the player list and, if one is selected, its detail panel."""
         world = self.selected_world()
         if not world or not self.instance:
             return
         server_dir = paths.server_dir(self.instance.directory, world.folder_name)
         online = set(self.server.players) if self.server and self.server.is_alive else set()
 
-        self.players_panel.set_players(
-            players.gather_players(
-                self.instance.directory, server_dir, world.owner_uuid, online
+        known = players.gather_players(
+            self.instance.directory, server_dir, world.owner_uuid, online
+        )
+        banned = players.read_banned(server_dir)
+        for player in known:
+            player.is_banned = any(
+                str(entry.get("name", "")).lower() == player.name.lower()
+                for entry in banned
             )
+
+        self.players_panel.set_players(known)
+        self._request_player_avatars(known)
+        self._on_player_selected(self.players_panel.selected())
+
+    def _request_player_avatars(self, known: list) -> None:
+        """Faces for the list, fetched once each and cached on disk."""
+        uuids = {p.name: p.uuid for p in known if p.uuid}
+        for name, uuid in uuids.items():
+            cached = avatars.cached_head(uuid)
+            if cached:
+                self.players_panel.set_avatar(name, str(cached))
+                continue
+            if name in self._avatars_requested:
+                continue
+            self._avatars_requested.add(name)
+            self._run(
+                lambda report, u=uuid: avatars.fetch_head(u, 24),
+                lambda path, n=name: self.players_panel.set_avatar(n, str(path))
+                if path
+                else None,
+            )
+
+    def _on_player_selected(self, player) -> None:
+        detail = self.players_panel.detail
+        if player is None:
+            detail.set_player(None)
+            return
+
+        avatar = avatars.cached_head(player.uuid) if player.uuid else None
+        session = ""
+        started = self._player_sessions.get(player.name)
+        if player.is_online and started:
+            session = serverstats.format_uptime(time.time() - started)
+        elif player.is_online:
+            # Joined before the launcher was watching - say so rather than
+            # inventing a duration.
+            session = "connected"
+
+        detail.set_player(player, str(avatar) if avatar else "", session)
+        detail.set_abilities(self._essentials_abilities, set())
+
+        telemetry = self._player_telemetry.get(player.name)
+        detail.ping.setText(
+            f"{telemetry.ping_ms} ms" if telemetry and telemetry.ping_ms is not None
+            else "not available"
+        )
+
+        if not self._luckperms_ready():
+            detail.set_permissions_available(
+                False,
+                "Start the server to see and change permissions - LuckPerms only "
+                "answers while it is running.",
+            )
+            return
+
+        detail.set_permissions_available(True)
+        self._load_player_permissions(player)
+
+    def _load_player_permissions(self, player) -> None:
+        """Groups, own permissions, and what those groups grant."""
+        if not self._luckperms_ready():
+            return
+        server = self.server
+        name = player.name
+
+        def work(report):
+            report(f"Reading permissions for {name}...")
+            info = luckperms.parse_user_info(server.query(luckperms.user_info(name)), name)
+            nodes = luckperms.parse_permission_nodes(
+                server.query(luckperms.user_permissions(name))
+            )
+            values: dict = {}
+            inherited: dict = {}
+            probe = nodes[0] if nodes else "minecraft.command.help"
+            reply = server.query(luckperms.check_user_permission(name, probe))
+            values = luckperms.parse_permission_values(reply)
+            inherited = luckperms.parse_inherited_permissions(reply)
+            groups = luckperms.parse_groups(server.query(luckperms.list_groups()))
+            return info, luckperms.combine_permissions(nodes, values), inherited, groups
+
+        def done(payload):
+            info, own, inherited, groups = payload
+            detail = self.players_panel.detail
+            detail.set_groups(info.groups, [g.name for g in groups], info.primary_group or "")
+            detail.set_permissions(own, inherited)
+            granted = {p.node for p in own if p.value} | {
+                node for node, (value, _) in inherited.items() if value
+            }
+            detail.set_abilities(self._essentials_abilities, granted)
+
+        self._run(work, done)
+
+    def _set_banned(self, player, banned: bool) -> None:
+        if self.server and self.server.is_alive:
+            self._send_command(
+                f"ban {player.name}" if banned else f"pardon {player.name}"
+            )
+        else:
+            self.console.append_notice(
+                "Start the server to ban or unban - the ban list is owned by it "
+                "while it runs.",
+                "#ffa94d",
+            )
+            return
+        QTimer.singleShot(800, self.refresh_players)
+
+    def _set_user_permission(self, player, node: str, allow: bool) -> None:
+        self._lp(
+            luckperms.set_user_permission(player.name, node, allow),
+            lambda _: self._load_player_permissions(player),
+        )
+
+    def _unset_user_permission(self, player, node: str) -> None:
+        self._lp(
+            luckperms.unset_user_permission(player.name, node),
+            lambda _: self._load_player_permissions(player),
         )
 
     def _server_dir(self):
@@ -2475,6 +2623,7 @@ class MainWindow(QMainWindow):
         self.settings.save()
 
     def _on_player_joined(self, name: str) -> None:
+        self._player_sessions[name] = time.time()
         if not self.settings.join_broadcast_enabled:
             return
         message = self.settings.join_broadcast_message.replace("{player}", name)

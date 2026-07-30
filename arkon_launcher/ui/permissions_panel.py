@@ -800,8 +800,10 @@ class PermissionsPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.groups_tab, "Groups")
-        self.tabs.addTab(self.users_tab, "Players")
         self.tabs.addTab(self.tracks_tab, "Tracks")
+        # Per-player permissions live on the Players tab now - two places
+        # editing the same thing is two places to drift apart.
+        self.users_tab.setVisible(False)
 
         self.notice = QLabel("")
         self.notice.setWordWrap(True)

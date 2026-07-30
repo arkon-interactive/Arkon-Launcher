@@ -11,6 +11,34 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.11.0
+
+- **A new dark theme.** Still dark, but built out of layered surfaces, one
+  accent colour and a real type scale rather than boxes and grey lines. Colours
+  live in one file, so a hardcoded hex anywhere else is now a bug rather than a
+  style choice. Checkbox ticks and dropdown arrows are drawn as icons — Qt
+  renders the CSS-border approach as blank squares under the Fusion style.
+- **The Players tab is now a per-player home.** Pick someone from the list and
+  the panel beside it shows who they are and everything you can do to them:
+  avatar, a status dot for online/offline, session length, ping, and their
+  groups and permissions.
+  - Op and ban **arm rather than ask** — click to arm, click again to confirm,
+    right-click or Esc to cancel. That is the same gesture as Start and Stop, so
+    there is one thing to learn for every consequential action in the app.
+  - The status dot means presence and nothing else. Reusing it to show a
+    half-confirmed action would hide whether the player is actually online at
+    the exact moment you are deciding to ban them.
+  - Permissions granted by a group are shown greyed, next to the player's own —
+    so it is clear which ones can be changed here and which belong to the group.
+- **Permissions tab no longer has its own Players sub-tab.** Per-player
+  permissions live with the player; the tab keeps Groups and Tracks.
+- **Groundwork for Arkon Essentials.** When the mod ships an ability manifest,
+  an "Essentials abilities" section appears with a toggle per ability; ping
+  fills in when the mod reports it. Both consumers are built and inert until the
+  mod provides the data — the contract is written down in `INTEGRATION.md`
+  rather than guessed at, because inventing permission-node names would produce
+  switches that silently do nothing.
+
 ## 0.10.0
 
 - **Turn mods on and off.** Disabled mods now appear in the list marked "(off)"

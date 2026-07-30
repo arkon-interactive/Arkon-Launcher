@@ -14,7 +14,10 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setOrganizationName("Arkon")
-    app.setStyle("Fusion")
+
+    from .ui import theme
+
+    theme.apply(app)
 
     # Imported here so a Qt failure surfaces after QApplication exists and can
     # therefore be shown in a dialog rather than a silent exit.

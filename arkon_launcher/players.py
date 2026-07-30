@@ -28,6 +28,7 @@ class KnownPlayer:
     is_whitelisted: bool = False
     is_online: bool = False
     is_world_owner: bool = False
+    is_banned: bool = False
 
     @property
     def role(self) -> str:
@@ -37,6 +38,8 @@ class KnownPlayer:
         over having created the world - which is only trivia once the server is
         running. Both are shown when they apply to the same person.
         """
+        if self.is_banned:
+            return "Banned"
         if self.is_op:
             return "Operator (world owner)" if self.is_world_owner else "Operator"
         return "World owner" if self.is_world_owner else "Player"
@@ -65,6 +68,11 @@ def read_ops(server_dir: Path) -> list[dict]:
 
 def read_whitelist(server_dir: Path) -> list[dict]:
     return _read_json_list(Path(server_dir) / "whitelist.json")
+
+
+def read_banned(server_dir: Path) -> list[dict]:
+    """The server's ban list. Banned players are never online."""
+    return _read_json_list(Path(server_dir) / "banned-players.json")
 
 
 def read_usercache(instance_dir: Path) -> list[dict]:

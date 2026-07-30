@@ -64,6 +64,7 @@ from .config_editor import ConfigEditor
 from .console_view import ConsoleView
 from .countdown_button import CountdownButton
 from .extra_panel import ExtraPanel, describe_hours, describe_restart_lead
+from .mods_panel import NOTABLE as NOTABLE_EXCLUSIONS, ModsPanel
 from .panels import BackupsPanel, ConnectionPanel, PlayersPanel
 from .permissions_panel import PermissionsPanel
 from .settings_panel import ServerSettingsPanel
@@ -198,6 +199,56 @@ class MainWindow(QMainWindow):
 
         self._run(work, done)
 
+    def refresh_mods(self) -> None:
+        """Build the mods list, including why each mod is or isn't on the server."""
+        if not self.instance:
+            return
+        instance = self.instance
+        world = self.selected_world()
+        world_settings = (
+            WorldSettings.load(instance.directory, world.folder_name) if world else None
+        )
+
+        def work(report):
+            report("Reading mods...")
+            result = modsync.select_server_mods(
+                instance.mods_dir,
+                user_disabled_ids=set(world_settings.disabled_mod_ids) if world_settings else set(),
+                force_include_ids=set(world_settings.force_include_mod_ids)
+                if world_settings
+                else set(),
+            )
+            rows = []
+            for mod in result.included + result.excluded:
+                rows.append(
+                    {
+                        "mod_id": mod.mod_id or "",
+                        "name": mod.display_name or mod.mod_id or mod.name,
+                        "version": mod.version or "",
+                        "environment": mod.environment,
+                        "included": mod.included,
+                        "reason": mod.excluded_by.value if mod.excluded_by else "",
+                        "detail": mod.detail,
+                        "notable": mod.excluded_by in NOTABLE_EXCLUSIONS,
+                        "file": mod.name,
+                        "configs": modsync.find_mod_configs(
+                            mod.mod_id or "", instance.config_dir
+                        ),
+                    }
+                )
+            rows.sort(key=lambda r: r["name"].lower())
+            return rows
+
+        self._run(work, self.mods_panel.set_mods)
+
+    def _edit_config_from_mods(self, path) -> None:
+        """Jump from a mod straight to editing its config."""
+        if not self.instance:
+            return
+        self.tabs.setCurrentWidget(self.config_editor)
+        self.config_editor.set_root(self.instance.config_dir)
+        self.config_editor.select_file(Path(path))
+
     def check_mod_updates(self, announce_when_current: bool = False) -> None:
         """See whether any first-party mod in the pack has a newer release."""
         if not self.instance:
@@ -206,13 +257,31 @@ class MainWindow(QMainWindow):
 
         def work(report):
             report("Checking for mod updates...")
-            return modupdater.check_for_updates(mods_dir)
+            checked = [
+                (modupdater.tracked_for(mod_id).display_name, version)
+                for mod_id, (_, version) in modupdater.installed_jars(mods_dir).items()
+                if modupdater.tracked_for(mod_id)
+            ]
+            return modupdater.check_for_updates(mods_dir), checked
 
-        def done(updates):
+        def done(payload):
+            updates, checked = payload
             if not updates:
-                if announce_when_current:
-                    self.console.append_notice("All tracked mods are up to date.")
+                # Say so even when there is nothing to do. Silence here is
+                # indistinguishable from the check being broken.
+                if checked:
+                    summary = ", ".join(f"{name} {version}" for name, version in checked)
+                    self.console.append_notice(f"Mods up to date: {summary}")
+                elif announce_when_current:
+                    self.console.append_notice(
+                        "No tracked mods are installed, so there was nothing to check."
+                    )
+                self.mods_panel.set_update_status(
+                    "Up to date" if checked else "No tracked mods installed"
+                )
                 return
+
+            self.mods_panel.set_update_status(f"{len(updates)} update(s) available")
             for release, jar, installed in updates:
                 self._offer_mod_update(release, jar, installed)
 
@@ -519,6 +588,13 @@ class MainWindow(QMainWindow):
         self.config_editor = ConfigEditor()
         self.config_editor.save_requested.connect(self._save_config_file)
 
+        self.mods_panel = ModsPanel()
+        self.mods_panel.refresh_requested.connect(self.refresh_mods)
+        self.mods_panel.check_updates_requested.connect(
+            lambda: self.check_mod_updates(announce_when_current=True)
+        )
+        self.mods_panel.edit_config.connect(self._edit_config_from_mods)
+
         self.settings_panel = ServerSettingsPanel()
         self.settings_panel.save_requested.connect(self.save_settings)
         self.settings_panel.save_and_restart_requested.connect(self.save_and_restart)
@@ -571,6 +647,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.settings_panel, "Settings")
         self.tabs.addTab(self.players_panel, "Players")
         self.tabs.addTab(self.permissions_panel, "Permissions")
+        self.tabs.addTab(self.mods_panel, "Mods")
         self.tabs.addTab(self.config_editor, "Config files")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -2345,6 +2422,8 @@ class MainWindow(QMainWindow):
             self.refresh_settings()
         elif widget is self.permissions_panel:
             self.refresh_permissions()
+        elif widget is self.mods_panel:
+            self.refresh_mods()
         elif widget is self.config_editor and self.instance:
             self.config_editor.set_root(self.instance.config_dir)
         elif widget is self.connection_panel and not self.connection.status.lan_addresses:

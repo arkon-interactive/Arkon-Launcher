@@ -547,6 +547,48 @@ def remove_legacy_world_link(server_dir: Path, link_name: str = "world") -> bool
             return False
 
 
+# Config files are named by convention rather than by anything declared in the
+# mod, so matching them is a heuristic: `<modid>.json`, `<modid>-common.toml`,
+# a `<modid>/` folder, and so on.
+CONFIG_SUFFIXES = {
+    ".json", ".json5", ".toml", ".cfg", ".conf", ".properties",
+    ".yaml", ".yml", ".txt", ".snbt", ".ini",
+}
+
+
+def find_mod_configs(mod_id: str, config_dir: Path, limit: int = 12) -> list[Path]:
+    """Config files that appear to belong to a mod.
+
+    Matched on filename, since nothing in a Fabric mod declares where its config
+    lives. A mod whose config is named after something other than its id will
+    not be found - which is why the UI says "looks like" rather than asserting.
+    """
+    config_dir = Path(config_dir)
+    if not mod_id or not config_dir.is_dir():
+        return []
+
+    needle = mod_id.lower()
+    found: list[Path] = []
+
+    for entry in sorted(config_dir.iterdir()):
+        if len(found) >= limit:
+            break
+        name = entry.name.lower()
+        if entry.is_dir():
+            if name == needle or name.startswith(needle):
+                for child in sorted(entry.rglob("*")):
+                    if child.is_file() and child.suffix.lower() in CONFIG_SUFFIXES:
+                        found.append(child)
+                        if len(found) >= limit:
+                            break
+        elif entry.suffix.lower() in CONFIG_SUFFIXES:
+            stem = entry.stem.lower()
+            if stem == needle or stem.startswith(f"{needle}-") or stem.startswith(f"{needle}_"):
+                found.append(entry)
+
+    return found
+
+
 def world_container(save_dir: Path) -> tuple[Path, str]:
     """Split a save path into the (universe, world name) the server wants."""
     save_dir = Path(save_dir)

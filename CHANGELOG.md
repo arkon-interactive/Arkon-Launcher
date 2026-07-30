@@ -11,6 +11,21 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.8.0
+
+- **Mods tab.** Every installed mod with its version, which side it declares,
+  and — the useful column — whether the server actually loads it and why not.
+  Client-only mods, older duplicates and anything stranded by a missing
+  dependency are all named, instead of that only being discoverable by reading
+  the startup log.
+- **Configs are listed against the mod they belong to.** Double-click a row to
+  edit them; mods with several configs offer a pick-list. Matching is by
+  filename, since nothing in a Fabric mod declares where its config lives.
+- **Mod update checks now report when everything is current.** Previously a
+  successful check with nothing to do said nothing at all, which is
+  indistinguishable from the check being broken. There is also a manual
+  "Check for mod updates" button.
+
 ## 0.7.0
 
 - **Server stats** replace the instance and world pickers once a server is

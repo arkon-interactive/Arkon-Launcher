@@ -176,6 +176,42 @@ class ConfigEditor(QWidget):
                 node.setData(0, Qt.UserRole, str(entry))
                 parent.addChild(node)
 
+    def select_file(self, path: Path) -> None:
+        """Reveal and open a specific file - used when jumping from the mods list."""
+        target = str(Path(path))
+
+        def find(item):
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if child.data(0, Qt.UserRole) == target:
+                    return child
+                found = find(child)
+                if found:
+                    return found
+            return None
+
+        node = find(self.tree.invisibleRootItem())
+        if node is None:
+            # Not in the tree - too large, or an extension we do not edit.
+            QMessageBox.information(
+                self,
+                "Not editable here",
+                f"{Path(path).name} is not in the editable list. It may be larger "
+                f"than the editor handles, or a format this editor does not open.",
+            )
+            return
+
+        self.search_and_reveal(node)
+
+    def search_and_reveal(self, node) -> None:
+        self.filter_box.clear()
+        parent = node.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        self.tree.setCurrentItem(node)
+        self.tree.scrollToItem(node)
+
     def _apply_filter(self, text: str) -> None:
         text = text.strip().lower()
 

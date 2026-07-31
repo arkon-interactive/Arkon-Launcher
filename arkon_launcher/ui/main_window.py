@@ -572,6 +572,8 @@ class MainWindow(QMainWindow):
             return
         mods_dir = self.instance.mods_dir
 
+        instance_dir = self.instance.directory
+
         def work(report):
             report("Checking for mod updates...")
             checked = [
@@ -579,23 +581,33 @@ class MainWindow(QMainWindow):
                 for mod_id, (_, version) in modupdater.installed_jars(mods_dir).items()
                 if modupdater.tracked_for(mod_id)
             ]
-            return modupdater.check_for_updates(mods_dir), checked
+            # The whole pack, not just the mods we track on GitHub - the count
+            # someone actually wants is "how many of my mods need updating".
+            pack = modupdater.curseforge_updates(instance_dir, mods_dir)
+            return modupdater.check_for_updates(mods_dir), checked, pack
 
         def done(payload):
-            updates, checked = payload
+            updates, checked, pack = payload
+            pending = len(pack) + len(updates)
+
             if not updates:
                 # Say so even when there is nothing to do. Silence here is
                 # indistinguishable from the check being broken.
-                if checked:
-                    summary = ", ".join(f"{name} {version}" for name, version in checked)
-                    self.console.append_notice(f"Mods up to date: {summary}")
-                elif announce_when_current:
+                if pending:
                     self.console.append_notice(
-                        "No tracked mods are installed, so there was nothing to check."
+                        f"{pending} mod(s) pending update. Open the Mods tab to "
+                        f"review them."
+                    )
+                elif checked or announce_when_current:
+                    total = len(modupdater.installed_jars(mods_dir))
+                    self.console.append_notice(
+                        f"All {total} mods are up to date." if total
+                        else "No mods are installed, so there was nothing to check."
                     )
                 self.mods_panel.set_update_status(
-                    "Up to date" if checked else "No tracked mods installed"
+                    f"{pending} update(s) available" if pending else "Up to date"
                 )
+                self._set_mods_badge(pending)
                 return
 
             self.mods_panel.set_update_status(f"{len(updates)} update(s) available")
@@ -885,6 +897,7 @@ class MainWindow(QMainWindow):
         detail.whitelist_toggled.connect(self._set_whitelisted)
         detail.ban_toggled.connect(self._set_banned)
         detail.kick_requested.connect(self._kick_player)
+        detail.abilities_applied.connect(self._apply_abilities)
         detail.group_added.connect(self._add_user_to_group)
         detail.group_removed.connect(self._remove_user_from_group)
         detail.permission_set.connect(self._set_user_permission)
@@ -2010,6 +2023,37 @@ class MainWindow(QMainWindow):
 
         self._run(work, done)
 
+    def _apply_abilities(self, player, changes: dict) -> None:
+        """Send a batch of ability changes as one run of commands.
+
+        Sent from a worker with a small gap between them: these execute on the
+        server thread, and firing a dozen at once is what made the connection
+        time out when each checkbox sent its own.
+        """
+        if not (self.server and self.server.is_alive) or not changes:
+            return
+
+        name = self._player_name(player)
+        server = self.server
+        commands = [
+            luckperms.set_user_permission(name, node, on)
+            for node, on in sorted(changes.items())
+        ]
+
+        def work(report):
+            for index, command in enumerate(commands, 1):
+                report(f"Applying ability {index} of {len(commands)} to {name}...")
+                server.query(command, settle=0.2, timeout=8)
+            return len(commands)
+
+        def done(count):
+            self.console.append_notice(
+                f"Applied {count} ability change(s) to {name}."
+            )
+            self._load_essentials(player)
+
+        self._run(work, done)
+
     def _load_player_permissions(self, player) -> None:
         """Groups, own permissions, and what those groups grant."""
         if not self._luckperms_ready():
@@ -2640,23 +2684,43 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _add_user_to_group(self, player: str, group: str) -> None:
+    @staticmethod
+    def _player_name(player) -> str:
+        """Accept either a name or a player object.
+
+        Two panels drive these: the Permissions tab passes a name, the Players
+        tab passes the KnownPlayer it is showing. Passing the object straight
+        through built commands like ``lp user KnownPlayer(name=...) parent add``,
+        which the server rejected silently - the group simply never appeared.
+        """
+        return player if isinstance(player, str) else getattr(player, "name", str(player))
+
+    def _add_user_to_group(self, player, group: str) -> None:
+        name = self._player_name(player)
         self._lp(
-            luckperms.add_user_to_group(player, group),
-            lambda _: self._load_user_info(player),
+            luckperms.add_user_to_group(name, group),
+            lambda _: self._after_group_change(player, name),
         )
 
-    def _remove_user_from_group(self, player: str, group: str) -> None:
+    def _remove_user_from_group(self, player, group: str) -> None:
+        name = self._player_name(player)
         self._lp(
-            luckperms.remove_user_from_group(player, group),
-            lambda _: self._load_user_info(player),
+            luckperms.remove_user_from_group(name, group),
+            lambda _: self._after_group_change(player, name),
         )
 
-    def _set_user_primary_group(self, player: str, group: str) -> None:
+    def _set_user_primary_group(self, player, group: str) -> None:
+        name = self._player_name(player)
         self._lp(
-            luckperms.set_primary_group(player, group),
-            lambda _: self._load_user_info(player),
+            luckperms.set_primary_group(name, group),
+            lambda _: self._after_group_change(player, name),
         )
+
+    def _after_group_change(self, player, name: str) -> None:
+        """Refresh whichever panel asked for the change."""
+        self._load_user_info(name)
+        if not isinstance(player, str):
+            self._load_player_permissions(player)
 
     # --- Backups ---
 
@@ -3133,6 +3197,35 @@ class MainWindow(QMainWindow):
         path = self._properties_path()
         return provision.read_properties(path) if path else {}
 
+    def _server_paused(self, tps: float | None) -> bool:
+        """Whether a zero tick rate is Minecraft's empty-server pause.
+
+        ``pause-when-empty-seconds`` stops the tick loop once the server has
+        been empty for that long, so an idle server genuinely reports zero. It
+        is only a pause if nobody is on and the setting is actually enabled.
+        """
+        if tps is None or tps > 0.5:
+            return False
+        if self.server and self.server.players:
+            return False
+        return self._pause_when_empty_seconds() > 0
+
+    def _pause_when_empty_seconds(self) -> int:
+        world = self.selected_world()
+        if not (self.instance and world):
+            return 0
+        path = (
+            paths.server_dir(self.instance.directory, world.folder_name)
+            / "server.properties"
+        )
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("pause-when-empty-seconds="):
+                    return int(line.split("=", 1)[1].strip() or 0)
+        except (OSError, ValueError):
+            return 0
+        return 0
+
     def _measure_tps(self) -> None:
         """Ask the pack's /tps command, or work it out from the tick counter."""
         if not (self.server and self.server.is_alive) or self._tps_pending:
@@ -3143,7 +3236,11 @@ class MainWindow(QMainWindow):
 
         def work(report):
             if use_command:
-                reply = server.query("tps", settle=0.4, timeout=6)
+                # Generous window: commands run on the server thread, so one
+                # coinciding with an autosave can miss a short one. Giving up
+                # after a single miss used to disable /tps - and with it MSPT,
+                # which has no other source - for the rest of the session.
+                reply = server.query("tps", settle=0.4, timeout=10)
                 tps, mspt = serverstats.parse_tps(reply)
                 if tps is not None:
                     return tps, mspt, True
@@ -3158,13 +3255,20 @@ class MainWindow(QMainWindow):
             if len(result) == 3:
                 tps, mspt, worked = result
                 self._tps_command_works = worked
-                self.stats_panel.set_tps(tps, mspt)
+                self._tps_misses = 0
+                self.stats_panel.set_tps(tps, mspt, self._server_paused(tps))
                 return
+
             _, _, worked, ticks = result
-            self._tps_command_works = worked
+            # Only conclude the pack has no /tps after it has failed repeatedly.
+            # A single miss is far more likely to be a busy server thread.
+            self._tps_misses = getattr(self, "_tps_misses", 0) + 1
+            if self._tps_misses >= 3:
+                self._tps_command_works = worked
+
             measured = self._tick_sampler.sample(ticks)
             if measured is not None:
-                self.stats_panel.set_tps(measured, None)
+                self.stats_panel.set_tps(measured, None, self._server_paused(measured))
 
         def failed(_):
             self._tps_pending = False

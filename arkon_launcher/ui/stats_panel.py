@@ -109,7 +109,25 @@ class ServerStatsPanel(QWidget):
         self.world_name.setText(name)
         self.state.setText(f"Minecraft {mc_version}" if mc_version else "")
 
-    def set_tps(self, tps: float | None, mspt: float | None) -> None:
+    def set_tps(
+        self, tps: float | None, mspt: float | None, paused: bool = False
+    ) -> None:
+        if paused:
+            # Minecraft stops ticking an empty server on purpose, so zero here
+            # is the setting working rather than the server struggling. Reading
+            # "0.0 / 20" in red would send someone hunting a problem that is
+            # not there.
+            self.tps.setText("paused - no players")
+            self.tps.setStyleSheet(f"{VALUE} color:#8b949e;")
+            self.tps.setToolTip(
+                "server.properties sets pause-when-empty-seconds, so the server "
+                "stops ticking once it has been empty for that long. It resumes "
+                "the moment someone joins."
+            )
+            self.mspt.setText("-")
+            return
+
+        self.tps.setToolTip("")
         if tps is None:
             self.tps.setText("measuring...")
             self.tps.setStyleSheet(f"{VALUE} color:#8b949e;")

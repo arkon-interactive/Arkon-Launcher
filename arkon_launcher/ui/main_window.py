@@ -1613,13 +1613,6 @@ class MainWindow(QMainWindow):
         the console they would bury everything else - so while a scan is running
         they are collected for node extraction and never displayed.
         """
-        # Telemetry from Arkon Essentials is data, not reading material.
-        if essentials.is_telemetry(line):
-            payload = essentials.parse_telemetry(line)
-            if payload:
-                for row in essentials.players_from_telemetry(payload):
-                    self._player_telemetry[row.name] = row
-            return
         if self._scanning and permissionnodes.is_verbose_line(line):
             self._scan_buffer.append(line)
             # Bounded: a long session must not accumulate without limit. Older
@@ -1836,13 +1829,12 @@ class MainWindow(QMainWindow):
             session = "connected"
 
         detail.set_player(player, str(avatar) if avatar else "", session)
-        detail.set_abilities(self._essentials_abilities, set())
 
-        telemetry = self._player_telemetry.get(player.name)
-        detail.ping.setText(
-            f"{telemetry.ping_ms} ms" if telemetry and telemetry.ping_ms is not None
-            else "not available"
-        )
+        # Declared defaults first, so the section is populated immediately; the
+        # live resolution replaces it when the server answers.
+        detail.set_abilities(self._essentials_abilities, {}, live=False)
+        self._show_ping(player)
+        self._load_essentials(player)
 
         if not self._luckperms_ready():
             detail.set_permissions_available(
@@ -1854,6 +1846,75 @@ class MainWindow(QMainWindow):
 
         detail.set_permissions_available(True)
         self._load_player_permissions(player)
+
+    def _essentials_ready(self) -> bool:
+        """True when the mod is installed, declares a manifest, and is running."""
+        return bool(
+            self._essentials_abilities and self.server and self.server.is_alive
+        )
+
+    def _show_ping(self, player) -> None:
+        telemetry = self._player_telemetry.get(player.name)
+        if telemetry is None or telemetry.ping_ms is None:
+            self.players_panel.detail.ping.setText(
+                "not available" if player.is_online else "-"
+            )
+            return
+        self.players_panel.detail.ping.setText(f"{telemetry.ping_ms} ms")
+
+    def _load_essentials(self, player) -> None:
+        """Latency and resolved abilities, both straight from the mod.
+
+        ``/arkon perms`` is asked in preference to reading LuckPerms because it
+        reports what the mod itself concluded - including its own fallbacks -
+        rather than what one particular permission plugin was told.
+        """
+        if not self._essentials_ready():
+            return
+
+        server = self.server
+        name = player.name
+        # Offline players are not in the ping report and cannot be looked up by
+        # name; the mod accepts a UUID for exactly this case.
+        target = name if player.is_online else (player.uuid or name)
+
+        def ask(command, parse):
+            """Send a command and parse the reply, retrying once.
+
+            Commands run on the server thread, which blocks during an autosave -
+            on a large world that can outlast a single capture window, and the
+            reply then arrives after nobody is listening. One retry costs a
+            second in the rare case and turns a blank ping into a real one.
+            """
+            for attempt in range(2):
+                parsed = parse(server.query(command, timeout=10.0))
+                if parsed:
+                    return parsed
+            return parse([])
+
+        def work(report):
+            report(f"Asking Arkon Essentials about {name}...")
+            pings = ask(essentials.PING_COMMAND, essentials.parse_ping_report)
+            resolved = ask(
+                essentials.perms_command(target), essentials.parse_perms_report
+            )
+            return pings, resolved
+
+        def done(payload):
+            pings, resolved = payload
+            for row in pings:
+                self._player_telemetry[row.name] = row
+
+            current = self.players_panel.selected()
+            if current is None or current.name != name:
+                return  # Selection moved on while we were asking.
+            self._show_ping(current)
+            if resolved:
+                self.players_panel.detail.set_abilities(
+                    self._essentials_abilities, resolved, live=True
+                )
+
+        self._run(work, done)
 
     def _load_player_permissions(self, player) -> None:
         """Groups, own permissions, and what those groups grant."""
@@ -1882,10 +1943,9 @@ class MainWindow(QMainWindow):
             detail = self.players_panel.detail
             detail.set_groups(info.groups, [g.name for g in groups], info.primary_group or "")
             detail.set_permissions(own, inherited)
-            granted = {p.node for p in own if p.value} | {
-                node for node, (value, _) in inherited.items() if value
-            }
-            detail.set_abilities(self._essentials_abilities, granted)
+            # Abilities are not derived from LuckPerms: /arkon perms answers for
+            # whatever provider is installed, and reports the mod's own fallback
+            # too, which LuckPerms has no way to know about.
 
         self._run(work, done)
 

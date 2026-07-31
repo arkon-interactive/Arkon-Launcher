@@ -32,12 +32,25 @@ there into the window title, the installer, and Add/Remove Programs.
     so it is clear which ones can be changed here and which belong to the group.
 - **Permissions tab no longer has its own Players sub-tab.** Per-player
   permissions live with the player; the tab keeps Groups and Tracks.
-- **Groundwork for Arkon Essentials.** When the mod ships an ability manifest,
-  an "Essentials abilities" section appears with a toggle per ability; ping
-  fills in when the mod reports it. Both consumers are built and inert until the
-  mod provides the data — the contract is written down in `INTEGRATION.md`
-  rather than guessed at, because inventing permission-node names would produce
-  switches that silently do nothing.
+- **Arkon Essentials integration, against the real mod.** With Essentials
+  installed, the Players tab gains an "Essentials abilities" section listing
+  every permission the mod declares, grouped by category, and fills in per-player
+  ping — something Minecraft exposes to no tool on its own.
+  - Abilities are read from the mod's own manifest inside the jar, so the list
+    cannot go stale, and it works with the server stopped.
+  - Resolution comes from `/arkon perms`, not from LuckPerms. It answers for
+    whichever permission provider is installed, works for players who have never
+    connected, and distinguishes a real grant from the mod's own fallback. That
+    last distinction is the point: for an operator the fallback is always yes,
+    which is why a permission tier looks like it works until it is tested on an
+    unopped account.
+  - Nodes the mod reads from a server setting rather than gating on a permission
+    are shown as values naming that setting, not as toggles. A toggle there
+    would look identical to a working one and do nothing.
+  - Commands are retried once, because they execute on the server thread and a
+    large world's autosave can outlast a single reply window.
+  - Verified end to end against Essentials 0.32.0 on a running server. The
+    contract is recorded in `INTEGRATION.md`.
 
 ## 0.10.0
 

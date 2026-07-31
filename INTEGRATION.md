@@ -1,120 +1,146 @@
 # Arkon Essentials ↔ Arkon Launcher
 
-What the launcher reads from the mod, and the exact formats it accepts. Both are
-optional: without either, the launcher works normally and simply hides the
-corresponding UI.
+What the launcher reads from the mod, and the exact formats it accepts.
+Everything here is optional: without any of it the launcher works normally and
+simply hides the corresponding UI.
 
-The launcher side is already implemented (`arkon_launcher/essentials.py`), so
-these light up as soon as the mod provides them.
+**Status:** all three are implemented on both sides and verified against Arkon
+Essentials 0.32.0 on a live server. This document now records the contract as
+built, not as proposed.
 
 ---
 
-## 1. Ability manifest — a resource in the jar
+## 1. Permission manifest — a resource in the jar
 
 **Why a resource and not an API:** the launcher needs this with the server
 stopped, before anything is running. Reading it from the jar means no protocol,
 no port, no ordering problem, and it is versioned with the mod automatically.
 
-Ship it at:
+Shipped at:
 
 ```
 assets/arkonessentials/permissions.json
 ```
 
-Either a bare array, or an object with an `abilities` (or `permissions`) key:
-
 ```json
-[
-  {
-    "node": "arkonessentials.admin.mode",
-    "label": "Admin Mode",
-    "category": "Admin",
-    "description": "Bypass protections and see hidden players."
-  },
-  {
-    "node": "arkonessentials.demigod.flight",
-    "label": "Flight",
-    "category": "Movement"
-  },
-  {
-    "node": "arkonessentials.build.nv",
-    "label": "Night Vision",
-    "category": "Build"
-  }
-]
-```
-
-| Field | Required | Notes |
-|---|---|---|
-| `node` | yes | The exact string LuckPerms grants. `permission` also accepted |
-| `label` | no | Shown to the user; falls back to the node. `name` also accepted |
-| `category` | no | Groups the toggles into sections. `group` also accepted. Defaults to "General" |
-| `description` | no | Tooltip |
-
-**The `node` must be the string a permission check actually tests.** The mod
-currently registers via Fabric's `PermissionNode` with `Identifier`s — whatever
-LuckPerms sees for those is what belongs here. If in doubt: grant one to a test
-group, run `/lp user <name> permission check <node>`, and confirm it resolves.
-
-From scraping the current jar the gates appear to be `ADMIN_MODE`, `ADMIN_GHOST`,
-`ADMIN_TP`, `ADMIN_HOME`, `ADMIN_HOME_LIMIT`, `ADMIN_SEE_HIDDEN`, `BUILD_NV`,
-`BUILD_REACH`, `DEMIGOD_FLIGHT`, `FLY_SPEED`, `AFK_TOGGLE`, `AFK_REASON`,
-`TP_ALL`, `TP_BACK`, `TP_COORDS`, `TP_DEATH`, `TP_HERE`, `TP_OTHERS`,
-`TP_THERE`, `TP_TOP`, `TP_IMMUNE`, `FAKE_JOIN`, `FAKE_LEAVE`, `GRANT_IMMUNE`,
-`HOME_LIMIT`, `HOME_NAMED` — 26 in total. That list came from the constant pool
-and may be incomplete, which is exactly why it should be declared rather than
-guessed.
-
-Once present, the launcher shows an **Essentials Abilities** section on each
-player with a toggle per ability, grouped by category.
-
----
-
-## 2. Live telemetry — lines on stdout
-
-**Why stdout and not a socket:** the launcher already owns the server's stdin
-and stdout. That is a private, bidirectional channel with no port to bind, no
-firewall prompt, and no authentication to get wrong. A socket only becomes worth
-it if something other than the launcher needs the data.
-
-Print one JSON object per line, prefixed:
-
-```
-[ARKON] {"type":"players","players":[{"name":"FenixRysing","ping":42,"session":915}]}
+{
+  "schema": 1,
+  "mod": "arkonessentials",
+  "namespace": "arkonessentials",
+  "permissions": [
+    {
+      "node": "arkonessentials.home.named",
+      "id": "arkonessentials:home.named",
+      "label": "Named Homes",
+      "category": "Homes",
+      "type": "boolean",
+      "default": "config",
+      "configKey": "playerNamedHomes"
+    }
+  ]
+}
 ```
 
 | Field | Meaning |
 |---|---|
-| `name` | Player name — required, the row is ignored without it |
-| `ping` | Round-trip latency in ms. `ping_ms` or `latency` also accepted |
-| `session` | Seconds connected. `session_seconds` or `online_for` also accepted |
-| `afk` | Boolean |
+| `node` | Dotted form a permission mod grants. **Required.** |
+| `id` | Namespaced identifier the mod checks. Used to derive the path. |
+| `label` | Shown to the user. Falls back to `node`. |
+| `category` | Groups the toggles. Falls back to `General`. |
+| `type` | `boolean` or `integer`. Integers are values, not grants. |
+| `default` | `public` / `operator` / `config` / `denied` — what applies when nothing grants or denies the node. |
+| `configKey` | Which server setting supplies it, when `default` is `config`. |
 
-Anything else in the object is kept and available, so you can add fields without
-a launcher change.
+The reader is deliberately lenient — a bare array works, `permission` is accepted
+for `node`, `name` for `label`, `group` for `category` — so the two projects
+never have to land a change in the same commit.
 
-**Per-player ping is the motivating case.** Minecraft does not report it to the
-console at all, so the launcher currently shows "not available". The server
-knows it — it is in the player list packet — it just never reaches stdout.
+### Two things a consumer must get right
 
-Emit on a timer (every 5–10s is plenty) and/or on join and leave. These lines
-are **filtered out of the console pane**, so they will not spam it.
+**Namespace.** `node` is `arkonessentials.home.named`; `/arkon perms` reports the
+*path*, `home.named`. Correlate on the path, not the node.
 
-### Please don't
+**The manifest is a superset of what `/arkon perms` reports.** In 0.32.0 it
+declares 46 nodes while `/arkon perms` reports 43. The missing three
+(`home.limit`, `admin.home.limit`, `fly.demigod`) are config-backed values rather
+than permission gates — note that one of them is `type: boolean`, so **type is
+not what distinguishes them**. A consumer cannot tell which is which from the
+manifest alone; the reliable test is whether the running server reports the path.
+The launcher renders anything unreported as a read-only value naming its
+`configKey`, because a toggle there would look identical to a working one and do
+nothing.
 
-- Print telemetry every tick. It goes to `latest.log` whether displayed or not.
-- Put anything sensitive in it. It lands in the log file.
-- Assume the launcher is present — the mod must work standalone.
+> Worth considering for a future schema bump: an explicit flag (`"gated": false`,
+> or `"source": "config"`) would let a tool get this right with the server
+> stopped, instead of only once it is running.
 
 ---
 
-## Testing it
+## 2. Per-player latency — `/arkon ping`
 
-With the mod installed and the server running:
+Minecraft exposes per-player latency nowhere a tool can reach: `/list` gives
+names only, and there is no vanilla ping command. The mod returns **one line of
+JSON**, which matters over RCON — several lines would arrive concatenated into
+something the caller has to split first.
 
-```bash
-python tools/test_integration.py
+```
+/arkon ping
 ```
 
-Reports whether the manifest was found, how many abilities parsed, and whether
-any telemetry lines were seen.
+```json
+{"schema":1,"players":[{"name":"Steve","uuid":"…","ping":42,"hidden":false}]}
+```
+
+Pulled on demand rather than pushed to stdout. An earlier draft of this document
+proposed the mod print `[ARKON] {json}` continuously; the mod chose the command
+instead, which is better — no log spam, and the launcher asks only while the
+Players tab is open.
+
+`hidden` flags a vanished player rather than omitting them, leaving the decision
+to the caller. The launcher does not currently surface it.
+
+The launcher finds this line by shape, since there is no prefix to key off: it
+scans the reply for a line ending in `}` that decodes to an object containing
+`players`. The server's own `[HH:MM:SS] [Server thread/INFO]:` prefix is
+therefore harmless.
+
+---
+
+## 3. Resolved permissions — `/arkon perms <player|uuid>`
+
+```
+/arkon perms FenixRysing
+/arkon perms 77086af9-eeee-4bf5-90af-d223670841f8
+```
+
+```
+Permissions for FenixRysing:
+  tps = true (default)
+  home = true (default)
+  admin.vanish = false (denied)
+```
+
+Preferred over reading LuckPerms directly, for three reasons: it works with any
+permission provider, it answers for players who have never connected (via UUID),
+and the origin distinguishes **what the provider said** from **what the mod's own
+fallback decided**.
+
+That distinction is the whole value. A node reading `default` means nothing
+granted or denied it — and for an operator the fallback is always yes, which is
+why a permission tier looks like it works until it is tested on an unopped
+account. The launcher shows `granted` and `denied` in colour and everything else
+as muted context, so the two are never confused.
+
+Parsed as `<path> = <true|false> (granted|denied|default)`, with any log prefix
+stripped first.
+
+---
+
+## What the launcher does with all this
+
+- **Players tab → Essentials abilities** — every declared node, grouped by
+  category. With the server stopped it shows declared defaults and says so;
+  running, it shows what `/arkon perms` resolved for that player.
+- **Players tab → Ping** — from `/arkon ping`, refreshed when a player is
+  selected. Reads "not available" rather than inventing a number.
+- Both sections stay hidden entirely when the mod is absent or predates them.

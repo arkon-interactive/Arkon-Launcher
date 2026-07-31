@@ -207,7 +207,13 @@ class PlayerDetail(QWidget):
         # is nothing to bind toggles to, and guessing node names would produce
         # switches that silently do nothing.
         self.abilities_box = QGroupBox("Essentials abilities")
-        self._abilities_layout = QVBoxLayout(self.abilities_box)
+        abilities_outer = QVBoxLayout(self.abilities_box)
+        self.abilities_hint = QLabel("")
+        self.abilities_hint.setStyleSheet(f"color:{theme.TEXT_MUTED};")
+        self.abilities_hint.setWordWrap(True)
+        abilities_outer.addWidget(self.abilities_hint)
+        self._abilities_layout = QVBoxLayout()
+        abilities_outer.addLayout(self._abilities_layout)
         self.abilities_box.setVisible(False)
         self._ability_boxes: dict[str, QWidget] = {}
 
@@ -338,8 +344,18 @@ class PlayerDetail(QWidget):
             placeholder.setFlags(Qt.NoItemFlags)
             self.permissions.addItem(placeholder)
 
-    def set_abilities(self, abilities: list, granted: set[str]) -> None:
-        """Show a toggle per declared Essentials ability, grouped by category."""
+    def set_abilities(
+        self, abilities: list, resolved: dict | None = None, live: bool = False
+    ) -> None:
+        """Show every declared Essentials ability, grouped by category.
+
+        ``resolved`` is what ``/arkon perms`` said: path -> (effective, origin).
+        ``live`` says whether that reflects the running server or whether we are
+        only showing what the manifest declares. The difference is worth being
+        explicit about: a box ticked because the player is an operator and one
+        ticked because someone granted the node look identical otherwise, and
+        only the second survives them being deopped.
+        """
         from PySide6.QtWidgets import QCheckBox
 
         while self._abilities_layout.count():
@@ -354,19 +370,75 @@ class PlayerDetail(QWidget):
 
         from ..essentials import categories
 
+        resolved = resolved or {}
+        self.abilities_hint.setText(
+            "Ticked means the ability applies right now. Grey text is why - only "
+            "'granted' and 'denied' are set on this player; the rest is the "
+            "declared default."
+            if live else
+            "Start the server to see how these resolve for this player. Until "
+            "then these are the mod's declared defaults, not what is in force."
+        )
+
         for category, entries in sorted(categories(abilities).items()):
             group = QGroupBox(category)
             group_layout = QVBoxLayout(group)
+            group_layout.setSpacing(4)
+
             for ability in entries:
-                check = QCheckBox(ability.label)
-                check.setChecked(ability.node in granted)
-                check.setToolTip(ability.description or ability.node)
-                check.toggled.connect(
-                    lambda on, node=ability.node: self._player
-                    and self.permission_set.emit(self._player, node, on)
+                effective, origin = resolved.get(ability.path, (None, ""))
+
+                row = QHBoxLayout()
+                row.setSpacing(8)
+
+                # A node the running server does not report is not gated by a
+                # permission at all - the mod reads it from a server setting. A
+                # toggle for one would look identical to a working toggle and do
+                # nothing, so those are shown as a value with its source named.
+                config_backed = ability.is_numeric or (live and ability.path not in resolved)
+
+                if config_backed:
+                    control = QLabel(ability.label)
+                    # Indent past where a checkbox indicator would be, so every
+                    # label in the group starts in the same column.
+                    row.addSpacing(24)
+                    row.addWidget(control)
+                    row.addStretch(1)
+                    note = (
+                        f"set by {ability.config_key}"
+                        if ability.config_key else "set by the server config"
+                    )
+                else:
+                    control = QCheckBox(ability.label)
+                    control.setChecked(bool(effective))
+                    control.setEnabled(live)
+                    control.toggled.connect(
+                        lambda on, node=ability.node: self._player
+                        and self.permission_set.emit(self._player, node, on)
+                    )
+                    row.addWidget(control)
+                    row.addStretch(1)
+                    note = origin if origin in ("granted", "denied") else ability.default_text
+
+                control.setToolTip(
+                    f"{ability.description or ability.label}\n\n{ability.node}"
+                    + (f"\nSet by: {ability.config_key}" if ability.config_key else "")
                 )
-                group_layout.addWidget(check)
-                self._ability_boxes[ability.node] = check
+
+                # Explicit settings are worth reading; a default is context.
+                # "denied" earns the danger colour because it is the one state
+                # someone deliberately imposed against the grain.
+                colour = {
+                    "granted": theme.TEXT_MUTED,
+                    "denied": theme.DANGER,
+                }.get(note, theme.TEXT_DISABLED)
+                caption = QLabel(note)
+                caption.setStyleSheet(f"color:{colour}; font-size:11px;")
+                row.addWidget(caption)
+
+                group_layout.addLayout(row)
+                self._ability_boxes[ability.node] = control
+
             self._abilities_layout.addWidget(group)
 
         self.abilities_box.setVisible(True)

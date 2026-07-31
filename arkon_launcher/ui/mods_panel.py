@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -37,9 +38,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..modsync import Exclusion
+from . import theme
 from .config_editor import ConfigEditor
 
-HINT = "color:#8b949e;"
+HINT = f"color:{theme.TEXT_MUTED};"
+ACCENT = theme.ACCENT
+DISABLED_TEXT = theme.TEXT_DISABLED
 
 # Exclusions worth noticing rather than shrugging at - these mean a mod you
 # probably wanted is not running.
@@ -94,8 +98,67 @@ class DuplicateDialog(QDialog):
         return [jar for jar in self._jars if jar is not keeping]
 
 
+class DependencyDialog(QDialog):
+    """What is missing, who needs it, and what can be done about it."""
+
+    def __init__(self, gaps: list, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Missing dependencies")
+        self.resize(640, 420)
+        self._gaps = gaps
+        self._fixable = [gap for gap in gaps if gap.fixable]
+
+        explanation = QLabel(
+            "These mods declare a dependency that nothing on the server "
+            "supplies. Fabric refuses to start when a hard dependency is "
+            "unmet, so the launcher leaves the dependent mod out instead."
+        )
+        explanation.setWordWrap(True)
+
+        self.list = QListWidget()
+        for gap in gaps:
+            item = QListWidgetItem(
+                f"{gap.required_by}  needs  {gap.needed}      ({gap.explanation})"
+            )
+            item.setForeground(
+                QColor(ACCENT if gap.fixable else DISABLED_TEXT)
+            )
+            self.list.addItem(item)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+
+        if self._fixable:
+            fix = buttons.addButton(
+                f"Switch {len(self._fixable)} back on", QDialogButtonBox.AcceptRole
+            )
+            fix.setToolTip(
+                "These dependencies are installed but switched off. Turning them "
+                "back on is all that is needed."
+            )
+            buttons.accepted.connect(self.accept)
+        else:
+            # Nothing here can be fixed from inside the launcher: say so rather
+            # than offering a button that would do nothing.
+            explanation.setText(
+                explanation.text()
+                + "\n\nNone of these can be resolved automatically - the missing "
+                "mods are either not installed at all, or are client-only and "
+                "cannot run on a server. Install them through CurseForge."
+            )
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(explanation)
+        layout.addWidget(self.list, 1)
+        layout.addWidget(buttons)
+
+    def fixable(self) -> list:
+        return self._fixable
+
+
 class ModsPanel(QWidget):
     refresh_requested = Signal()
+    fix_dependencies = Signal(list)
     check_updates_requested = Signal()
     update_one = Signal(object)
     update_all = Signal()
@@ -123,6 +186,13 @@ class ModsPanel(QWidget):
         self.duplicates_button.clicked.connect(self._fix_duplicates)
         self.duplicates_button.setEnabled(False)
 
+        self.dependencies_button = QPushButton("Dependencies")
+        self.dependencies_button.clicked.connect(self._show_dependencies)
+        self.dependencies_button.setEnabled(False)
+        self.dependencies_button.setToolTip(
+            "Mods that need something the server does not have."
+        )
+
         check = QPushButton("Check for updates")
         check.clicked.connect(self.check_updates_requested.emit)
         refresh = QPushButton("Refresh")
@@ -130,6 +200,7 @@ class ModsPanel(QWidget):
 
         top = QHBoxLayout()
         top.addWidget(self.search, 1)
+        top.addWidget(self.dependencies_button)
         top.addWidget(self.duplicates_button)
         top.addWidget(self.update_all_button)
         top.addWidget(check)
@@ -146,8 +217,12 @@ class ModsPanel(QWidget):
         self.table.setSortingEnabled(True)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(COLUMN_MOD, QHeaderView.Stretch)
+        # Interactive, not ResizeToContents: the latter re-measures every cell in
+        # the column on each setItem, which across a 150-mod pack is thousands of
+        # layout passes and is what made this tab hitch on load. The columns are
+        # sized once after the rows are in, by _fit_columns.
         for column in (COLUMN_VERSION, COLUMN_SIDE, COLUMN_SERVER, COLUMN_UPDATE, COLUMN_CONFIG):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.table.cellDoubleClicked.connect(lambda *_: self._configure_selected())
 
@@ -230,6 +305,7 @@ class ModsPanel(QWidget):
         self._updates = payload.get("updates") or {}
 
         self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
 
         for index, row in enumerate(rows):
@@ -281,6 +357,8 @@ class ModsPanel(QWidget):
                 config_cell.setToolTip("\n".join(Path(p).name for p in configs[:8]))
             self.table.setItem(index, COLUMN_CONFIG, config_cell)
 
+        self._fit_columns()
+        self.table.setUpdatesEnabled(True)
         self.table.setSortingEnabled(True)
 
         loaded = sum(1 for r in rows if r["included"])
@@ -289,6 +367,12 @@ class ModsPanel(QWidget):
         if duplicate_count:
             parts.append(f"{duplicate_count} duplicate(s)")
         self.summary.setText(", ".join(parts) + ".")
+
+        self._missing = payload.get("missing") or []
+        self.dependencies_button.setEnabled(bool(self._missing))
+        self.dependencies_button.setText(
+            f"Dependencies ({len(self._missing)})" if self._missing else "Dependencies"
+        )
 
         self.duplicates_button.setEnabled(bool(self._duplicates))
         self.duplicates_button.setText(
@@ -305,6 +389,26 @@ class ModsPanel(QWidget):
         self._apply_filter(self.search.text())
         self._update_buttons()
 
+    def _fit_columns(self) -> None:
+        """Size the fixed columns once, after the rows are in.
+
+        Measuring every row would undo the point of doing this once, so only a
+        sample is measured and the widest wins. Column widths are cosmetic; the
+        cost of getting one slightly wrong is nothing, and the cost of measuring
+        150 rows five times over is the hitch this replaced.
+        """
+        sample = min(self.table.rowCount(), 40)
+        metrics = self.table.fontMetrics()
+        for column in (COLUMN_VERSION, COLUMN_SIDE, COLUMN_SERVER, COLUMN_UPDATE, COLUMN_CONFIG):
+            widest = metrics.horizontalAdvance(
+                self.table.horizontalHeaderItem(column).text()
+            )
+            for row in range(sample):
+                item = self.table.item(row, column)
+                if item is not None:
+                    widest = max(widest, metrics.horizontalAdvance(item.text()))
+            self.table.setColumnWidth(column, widest + 28)
+
     @staticmethod
     def _version_of(filename: str) -> str:
         """A readable version out of a jar filename, falling back to the name."""
@@ -320,6 +424,7 @@ class ModsPanel(QWidget):
         self.update_status.setText(text)
 
     def set_config_root(self, root) -> None:
+        self._config_root = Path(root) if root else None
         self.config_editor.set_root(root)
 
     def _apply_filter(self, text: str) -> None:
@@ -398,7 +503,27 @@ class ModsPanel(QWidget):
             self.configure_button.rect().bottomLeft()
         ))
 
+    def _show_dependencies(self) -> None:
+        gaps = getattr(self, "_missing", [])
+        if not gaps:
+            return
+        dialog = DependencyDialog(gaps, self)
+        if dialog.exec() == QDialog.Accepted and dialog.fixable():
+            self.fix_dependencies.emit(dialog.fixable())
+
     def _show_all_configs(self) -> None:
+        """Open the config folder itself.
+
+        The editor below already lists these files; what this button is for is
+        the things the editor cannot do - copying a config in, keeping a backup,
+        opening one in a real editor.
+        """
+        root = getattr(self, "_config_root", None)
+        if root and Path(root).is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(root)))
+            return
+        # No instance chosen yet, or the folder has not been created: fall back
+        # to the in-app list rather than doing nothing visible.
         self.config_editor.filter_box.clear()
         self.config_editor.setFocus()
 

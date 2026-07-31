@@ -331,6 +331,11 @@ class ServerSettingsPanel(QWidget):
         self._rules_layout = QVBoxLayout(self._rules_host)
         self.tabs.addTab(_scrollable(self._rules_host), "Game rules")
 
+        # Only present when Arkon Essentials is installed; added and removed by
+        # set_essentials_panel as the instance changes.
+        self.essentials_panel: QWidget | None = None
+        self._essentials_host: QWidget | None = None
+
         # Filled in by the main window - they are settings, so they live here
         # rather than as top-level tabs.
         self.backups_panel: QWidget | None = None
@@ -561,6 +566,23 @@ class ServerSettingsPanel(QWidget):
         """
         self.tabs.addTab(_scrollable(widget), title)
 
+    def set_essentials_panel(self, widget: QWidget | None) -> None:
+        """Show or hide the Essentials tab as the instance changes.
+
+        Qt has no way to hide a tab, so it is inserted and removed. Kept last so
+        the tab positions of everything else never move - the Save button is
+        shown or hidden by tab index.
+        """
+        if self._essentials_host is not None:
+            index = self.tabs.indexOf(self._essentials_host)
+            if index >= 0:
+                self.tabs.removeTab(index)
+            self._essentials_host = None
+
+        if widget is not None:
+            self._essentials_host = _scrollable(widget)
+            self.tabs.addTab(self._essentials_host, "Essentials")
+
     def _on_tab_changed(self, index: int) -> None:
         widget = self.tabs.widget(index)
         managed = widget is not None and index < 2
@@ -570,8 +592,12 @@ class ServerSettingsPanel(QWidget):
             managed and self.pending_needs_restart() and self._running
         )
         if not managed:
+            # Essentials is the exception: it has its own Save, because its
+            # settings are a file rather than something applied on the spot.
             self.status.setText(
-                "These apply as soon as you change them - there is nothing to save."
+                ""
+                if widget is not None and widget is self._essentials_host
+                else "These apply as soon as you change them - there is nothing to save."
             )
         else:
             self.set_server_running(self._running)

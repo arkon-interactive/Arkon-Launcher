@@ -681,36 +681,161 @@ def disable_jar(jar_path: Path) -> Path:
     return destination
 
 
-def find_mod_configs(mod_id: str, config_dir: Path, limit: int = 12) -> list[Path]:
-    """Config files that appear to belong to a mod.
+def build_config_index(config_dir: Path) -> dict:
+    """Walk the config folder once, so per-mod lookups are free afterwards.
+
+    Doing this per mod meant re-listing the whole folder - and recursing into
+    every matching subfolder - once for each of ~150 mods, which is most of what
+    made the Mods tab slow to appear.
+    """
+    config_dir = Path(config_dir)
+    index: dict = {"files": [], "dirs": {}}
+    if not config_dir.is_dir():
+        return index
+
+    try:
+        entries = sorted(config_dir.iterdir())
+    except OSError:
+        return index
+
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                children = [
+                    child
+                    for child in sorted(entry.rglob("*"))
+                    if child.is_file() and child.suffix.lower() in CONFIG_SUFFIXES
+                ]
+                index["dirs"][entry.name.lower()] = children
+            elif entry.suffix.lower() in CONFIG_SUFFIXES:
+                index["files"].append((entry.stem.lower(), entry))
+        except OSError:
+            continue
+
+    return index
+
+
+def configs_for(mod_id: str, index: dict, limit: int = 12) -> list[Path]:
+    """Config files that appear to belong to a mod, from a prebuilt index.
 
     Matched on filename, since nothing in a Fabric mod declares where its config
     lives. A mod whose config is named after something other than its id will
     not be found - which is why the UI says "looks like" rather than asserting.
     """
-    config_dir = Path(config_dir)
-    if not mod_id or not config_dir.is_dir():
+    if not mod_id:
         return []
 
     needle = mod_id.lower()
     found: list[Path] = []
 
-    for entry in sorted(config_dir.iterdir()):
-        if len(found) >= limit:
-            break
-        name = entry.name.lower()
-        if entry.is_dir():
-            if name == needle or name.startswith(needle):
-                for child in sorted(entry.rglob("*")):
-                    if child.is_file() and child.suffix.lower() in CONFIG_SUFFIXES:
-                        found.append(child)
-                        if len(found) >= limit:
-                            break
-        elif entry.suffix.lower() in CONFIG_SUFFIXES:
-            stem = entry.stem.lower()
-            if stem == needle or stem.startswith(f"{needle}-") or stem.startswith(f"{needle}_"):
-                found.append(entry)
+    for name, children in index["dirs"].items():
+        if name == needle or name.startswith(needle):
+            for child in children:
+                found.append(child)
+                if len(found) >= limit:
+                    return found
 
+    for stem, path in index["files"]:
+        if stem == needle or stem.startswith(f"{needle}-") or stem.startswith(f"{needle}_"):
+            found.append(path)
+            if len(found) >= limit:
+                break
+
+    return found
+
+
+def find_mod_configs(mod_id: str, config_dir: Path, limit: int = 12) -> list[Path]:
+    """One-off lookup. Prefer build_config_index when asking about many mods."""
+    return configs_for(mod_id, build_config_index(config_dir), limit)
+
+
+# --- Dependencies -------------------------------------------------------------
+
+
+@dataclass
+class MissingDependency:
+    """A dependency a mod declares that nothing on the server supplies."""
+
+    needed: str
+    required_by: str
+    remedy: str  # "enable" | "client_only" | "absent"
+    jar_path: Path | None = None
+
+    @property
+    def explanation(self) -> str:
+        return {
+            "enable": "switched off in your pack - can be switched back on",
+            "client_only": "installed, but client-only, so a server cannot load it",
+            "absent": "not installed",
+        }.get(self.remedy, self.remedy)
+
+    @property
+    def fixable(self) -> bool:
+        return self.remedy == "enable"
+
+
+def missing_dependencies(
+    result: SyncResult, mods_dir: Path | None = None
+) -> list[MissingDependency]:
+    """Every unmet dependency, and whether anything can be done about it.
+
+    Reported against what the *server* will actually load. A mod whose
+    dependency is only present as a client-only jar is genuinely broken for
+    server use even though the file is sitting right there, so the distinction
+    between "absent" and "client-only" is worth keeping.
+
+    Mods already excluded for other reasons are not reported: their dependencies
+    being unmet is a consequence, not a problem to fix.
+    """
+    available: set[str] = set(BUILTIN_MOD_IDS)
+    for mod in result.included:
+        available |= mod.supplied_ids()
+
+    # Where an unmet dependency might be recoverable from.
+    disabled_supply: dict[str, Path] = {}
+    if mods_dir is not None:
+        for mod in read_disabled_jars(mods_dir):
+            for supplied in mod.supplied_ids():
+                disabled_supply.setdefault(supplied, mod.path)
+
+    client_only: set[str] = set()
+    for mod in result.excluded:
+        if mod.excluded_by in (Exclusion.CLIENT_ENVIRONMENT, Exclusion.KNOWN_CLIENT_ONLY):
+            client_only |= mod.supplied_ids()
+
+    # Mods worth reporting on: those the server loads, plus those dropped purely
+    # because a dependency was unsatisfiable - the latter are the whole point.
+    candidates = list(result.included) + [
+        mod for mod in result.excluded if mod.excluded_by is Exclusion.DEPENDENCY_MISSING
+    ]
+
+    found: list[MissingDependency] = []
+    seen: set[tuple[str, str]] = set()
+
+    for mod in candidates:
+        owner = mod.display_name or mod.mod_id or mod.name
+        for dependency in mod.depends:
+            if dependency in available:
+                continue
+            key = (owner, dependency)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if dependency in disabled_supply:
+                remedy, jar = "enable", disabled_supply[dependency]
+            elif dependency in client_only:
+                remedy, jar = "client_only", None
+            else:
+                remedy, jar = "absent", None
+
+            found.append(
+                MissingDependency(
+                    needed=dependency, required_by=owner, remedy=remedy, jar_path=jar
+                )
+            )
+
+    found.sort(key=lambda d: (not d.fixable, d.required_by.lower(), d.needed))
     return found
 
 

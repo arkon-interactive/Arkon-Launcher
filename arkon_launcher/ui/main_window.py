@@ -64,6 +64,7 @@ from ..serversettings import PendingChanges
 from .config_editor import ConfigEditor
 from .console_view import ConsoleView
 from .countdown_button import CountdownButton
+from .essentials_panel import EssentialsPanel
 from .extra_panel import ExtraPanel, describe_hours, describe_restart_lead
 from .mods_panel import NOTABLE as NOTABLE_EXCLUSIONS, ModsPanel
 from .panels import BackupsPanel, ConnectionPanel
@@ -236,6 +237,11 @@ class MainWindow(QMainWindow):
                 for jar in jars[1:]
             }
 
+            # One walk of the config folder for the whole pack, rather than one
+            # per mod.
+            config_index = modsync.build_config_index(instance.config_dir)
+            gaps = modsync.missing_dependencies(result, instance.mods_dir)
+
             rows = []
             for mod in result.included + result.excluded + disabled:
                 rows.append(
@@ -252,12 +258,16 @@ class MainWindow(QMainWindow):
                         "path": mod.path,
                         "disabled": modsync.is_disabled(mod.path),
                         "is_duplicate": mod.path in older,
-                        "configs": modsync.find_mod_configs(
-                            mod.mod_id or "", instance.config_dir
-                        ),
+                        "configs": modsync.configs_for(mod.mod_id or "", config_index),
                     }
                 )
             rows.sort(key=lambda r: r["name"].lower())
+
+            needed_by: dict[str, list] = {}
+            for gap in gaps:
+                needed_by.setdefault(gap.required_by, []).append(gap)
+            for row in rows:
+                row["missing"] = needed_by.get(row["name"], [])
 
             updates = {
                 u.installed_file: u
@@ -270,12 +280,24 @@ class MainWindow(QMainWindow):
                 "rows": rows,
                 "duplicates": duplicates,
                 "updates": {k: v for k, v in updates.items()},
+                "missing": gaps,
             }
 
         def done(payload):
             self.mods_panel.set_mods(payload)
             self.mods_panel.set_config_root(instance.config_dir)
             self._set_mods_badge(len(payload["updates"]))
+
+            rows = payload["rows"]
+            loaded = sum(1 for row in rows if row["included"])
+            message = f"{len(rows)} mods read, {loaded} load on the server"
+            gaps = payload["missing"]
+            if gaps:
+                fixable = sum(1 for gap in gaps if gap.fixable)
+                message += f" - {len(gaps)} missing dependency(s)"
+                if fixable:
+                    message += f", {fixable} fixable here"
+            self._set_status(message + ".")
 
         self._run(work, done)
 
@@ -386,6 +408,63 @@ class MainWindow(QMainWindow):
                 f"{'Enabled' if enabled else 'Disabled'} {row['name']} "
                 f"({Path(new_path).name}). Takes effect next time the server starts."
             )
+            self.refresh_mods()
+
+        self._run(work, done)
+
+    def _save_essentials_config(self, path, text: str) -> None:
+        """Write the mod's config file, mirroring it if a server is up."""
+        self._save_config_file(path, text, False)
+
+    def _apply_essentials_live(self, changes: list) -> None:
+        """Push changed settings to the running server.
+
+        Sent as well as written, not instead: the running mod holds its own copy
+        and rewrites the file on shutdown, which would undo an edit made only on
+        disk.
+        """
+        if not (self.server and self.server.is_alive):
+            return
+        for key, value in changes:
+            self._send_command(f"arkon config {key} {value}")
+        self.console.append_notice(
+            f"Applied {len(changes)} Essentials setting(s) to the running server."
+        )
+
+    def _fix_dependencies(self, gaps: list) -> None:
+        """Switch missing dependencies back on.
+
+        Only ever called with gaps the checker marked fixable, which means the
+        jar is sitting in the pack under a .jar.disabled name. Nothing is
+        downloaded and nothing is deleted.
+        """
+        if not self.instance or not self._mods_busy_guard():
+            return
+
+        # One jar can supply several missing ids, so enable each file once.
+        jars = {gap.jar_path for gap in gaps if gap.jar_path}
+
+        def work(report):
+            enabled, failed = [], []
+            for jar in sorted(jars):
+                try:
+                    report(f"Enabling {Path(jar).name}...")
+                    modsync.enable_jar(Path(jar))
+                    enabled.append(Path(jar).name)
+                except OSError as exc:
+                    failed.append((Path(jar).name, str(exc)))
+            return enabled, failed
+
+        def done(result):
+            enabled, failed = result
+            for name in enabled:
+                self.console.append_notice(f"Switched {name} back on.")
+            for name, reason in failed:
+                self.console.append_notice(f"Could not enable {name}: {reason}", "#ff6b6b")
+            if enabled:
+                self.console.append_notice(
+                    "Dependencies are picked up the next time the server starts."
+                )
             self.refresh_mods()
 
         self._run(work, done)
@@ -842,6 +921,7 @@ class MainWindow(QMainWindow):
         self.mods_panel.toggle_mod.connect(self._toggle_mod)
         self.mods_panel.install_mod.connect(self._install_mod)
         self.mods_panel.uninstall_mod.connect(self._uninstall_mod)
+        self.mods_panel.fix_dependencies.connect(self._fix_dependencies)
         self.config_editor = self.mods_panel.config_editor
 
         self.settings_panel = ServerSettingsPanel()
@@ -889,6 +969,10 @@ class MainWindow(QMainWindow):
         # than competing with it at the top level.
         self.settings_panel.add_sub_tab(self.backups_panel, "Backups")
         self.settings_panel.add_sub_tab(self.extra_panel, "Extra")
+
+        self.essentials_panel = EssentialsPanel()
+        self.essentials_panel.save_requested.connect(self._save_essentials_config)
+        self.essentials_panel.apply_live.connect(self._apply_essentials_live)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.console, "Console")
@@ -998,6 +1082,15 @@ class MainWindow(QMainWindow):
         # Abilities come from a resource in the mod jar, so this works with
         # the server stopped and costs nothing when the mod is absent.
         self._essentials_abilities = essentials.read_abilities(instance.mods_dir)
+
+        # The Essentials tab exists only for instances that have the mod.
+        present = self.essentials_panel.set_instance(
+            instance.config_dir, instance.mods_dir
+        )
+        self.settings_panel.set_essentials_panel(
+            self.essentials_panel if present else None
+        )
+
         self.load_worlds()
 
     def load_worlds(self) -> None:
@@ -1068,6 +1161,7 @@ class MainWindow(QMainWindow):
         self.reload_button.setEnabled(running)
         self.restart_button.setEnabled(running)
         self.settings_panel.set_server_running(running)
+        self.essentials_panel.set_running(running)
 
         if world is not None and worlds.is_world_busy(world.folder) and not running:
             self._set_status(f"'{world.folder_name}' is open in Minecraft - close it first.")

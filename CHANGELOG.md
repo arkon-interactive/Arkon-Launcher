@@ -11,6 +11,47 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.12.0
+
+- **Config files can be edited as a form.** Pick a config on the Mods tab and,
+  when the file is shaped like settings, you get checkboxes, number fields and
+  text boxes with the mod author's own comments shown as the description — which
+  is usually the only documentation a setting has. TOML, JSON/JSON5 and
+  `.properties` are recognised.
+  - **Editing rewrites one value on one line.** The file is not parsed and
+    written back out, because that would reformat everything and discard the
+    comments. Verified against all 202 form-capable configs in the reference
+    pack: an untouched file round-trips byte-for-byte, and changing one setting
+    changes exactly one line.
+  - Files that are data rather than settings — loot tables, recipe lists — are
+    detected by their repeated keys and sent to the text view, where the
+    structure is actually visible. The text view is always available.
+  - Lists, nested values and commented-out lines are shown read-only. A form
+    that silently mangled them would be worse than not offering one.
+  - **On comments:** a line like `#enableFoo = true` is a disabled setting,
+    while `#Default: 1.5` is documentation, and both look the same to a parser.
+    The heuristic is biased towards calling things documentation, since
+    describing a setting costs nothing while offering to "re-enable" a line of
+    prose would write nonsense into a config.
+- **A dependency checker.** Mods declaring something the server does not have
+  are listed with what is missing and why — not installed, or installed but
+  client-only and therefore unusable on a server. Dependencies that are merely
+  switched off can be switched back on from the dialog; nothing is downloaded.
+  When nothing can be fixed automatically the dialog says so instead of offering
+  a button that would do nothing.
+- **An Essentials tab in Settings**, when Arkon Essentials is installed. Its
+  settings render through the same form. Saving while the server is running also
+  sends `/arkon config`, because the running mod holds its own copy and would
+  otherwise overwrite a file edited underneath it.
+- **The Mods tab no longer hitches on load.** Two causes: the config folder was
+  re-scanned once per mod (~9s across a 141-mod pack, now 0.08s for the whole
+  pack), and the table re-measured every cell in five columns on every insert.
+  Populating the table now blocks for 10ms.
+- **"Browse all config files" opens the config folder**, which is what it
+  sounded like it did.
+- Finishing a mod scan now reports how many mods were read and how many the
+  server loads, instead of leaving "Reading mods..." on screen.
+
 ## 0.11.0
 
 - **A new dark theme.** Still dark, but built out of layered surfaces, one

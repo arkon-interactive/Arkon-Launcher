@@ -27,11 +27,14 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from .config_form import ConfigForm
 
 HINT = "color:#8b949e;"
 
@@ -99,10 +102,21 @@ class ConfigEditor(QWidget):
         buttons.addWidget(self.revert_button)
         buttons.addWidget(self.save_button)
 
+        # Form first when the file is shaped like settings, text otherwise -
+        # and always both, because a form can only ever cover part of what a
+        # config file is allowed to contain.
+        self.form = ConfigForm()
+        self.form.changed.connect(self._on_form_changed)
+
+        self.views = QTabWidget()
+        self.views.addTab(self.form, "Settings")
+        self.views.addTab(self.editor, "Text")
+        self.views.currentChanged.connect(self._on_view_changed)
+
         right = QGroupBox("Editor")
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(self.path_label)
-        right_layout.addWidget(self.editor, 1)
+        right_layout.addWidget(self.views, 1)
         right_layout.addLayout(buttons)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -264,6 +278,12 @@ class ConfigEditor(QWidget):
         self.editor.setPlainText(text)
         self.editor.blockSignals(False)
         self.editor.setEnabled(True)
+
+        # The text view is always right; the form is only sometimes possible.
+        form_ok = self.form.load(path, text)
+        self.views.setTabEnabled(0, form_ok)
+        self.views.setTabText(0, "Settings" if form_ok else "Settings (n/a)")
+        self.views.setCurrentIndex(0 if form_ok else 1)
         try:
             shown = path.relative_to(self._root) if self._root else path
         except ValueError:
@@ -276,6 +296,23 @@ class ConfigEditor(QWidget):
 
     def _on_text_changed(self) -> None:
         self._update_buttons()
+
+    def _on_form_changed(self) -> None:
+        """Push a form edit into the text, which stays the single source.
+
+        Keeping one buffer authoritative means save, revert and the unsaved
+        marker all keep working unchanged, and the two views cannot drift.
+        """
+        self.editor.blockSignals(True)
+        self.editor.setPlainText(self.form.text())
+        self.editor.blockSignals(False)
+        self._update_buttons()
+
+    def _on_view_changed(self, index: int) -> None:
+        # Rebuild the form from the current text, so edits typed in the text
+        # view are reflected rather than silently reverted by the next toggle.
+        if index == 0 and self._current:
+            self.form.load(self._current, self.editor.toPlainText())
 
     def _update_buttons(self) -> None:
         dirty = self._is_dirty()

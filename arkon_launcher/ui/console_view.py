@@ -24,6 +24,11 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
+    QMenu,
+    QListWidget,
+    QDialogButtonBox,
+    QDialog,
+    QAbstractItemView,
     QCheckBox,
     QCompleter,
     QHBoxLayout,
@@ -201,10 +206,25 @@ class ConsoleView(QWidget):
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._on_submit)
 
+        # Noisy mods repeat the same line hundreds of times; hiding one keeps
+        # the console readable without losing it - the button is how you get it
+        # back, so hiding is never a one-way door.
+        self._hidden: set[str] = set()
+        self.hidden_button = QPushButton("Hidden")
+        self.hidden_button.setEnabled(False)
+        self.hidden_button.setToolTip(
+            "Lines you have hidden. Right-click any line to hide every copy of it."
+        )
+        self.hidden_button.clicked.connect(self._show_hidden_dialog)
+
+        self.output.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.output.customContextMenuRequested.connect(self._on_output_menu)
+
         top = QHBoxLayout()
         top.addWidget(QLabel("Console"))
         top.addStretch(1)
         top.addWidget(self.filter_box, 2)
+        top.addWidget(self.hidden_button)
         top.addWidget(self.autoscroll)
 
         bottom = QHBoxLayout()
@@ -328,7 +348,96 @@ class ConsoleView(QWidget):
                 self._write(raw, colour)
         self._scroll_if_wanted()
 
+    def _on_output_menu(self, point) -> None:
+        cursor = self.output.cursorForPosition(point)
+        cursor.select(cursor.SelectionType.LineUnderCursor)
+        line = cursor.selectedText().strip()
+
+        menu = QMenu(self)
+        if line:
+            message = self.message_of(line)
+            shown = message if len(message) <= 60 else message[:60] + "..."
+            hide = menu.addAction(f'Hide lines like "{shown}"')
+            hide.triggered.connect(lambda: self.hide_like(line))
+        if self._hidden:
+            menu.addSeparator()
+            menu.addAction("Show hidden lines...").triggered.connect(
+                self._show_hidden_dialog
+            )
+        copy = menu.addAction("Copy")
+        copy.triggered.connect(self.output.copy)
+        menu.exec(self.output.mapToGlobal(point))
+
+    def _show_hidden_dialog(self) -> None:
+        if not self._hidden:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Hidden console lines")
+        dialog.resize(680, 320)
+
+        listing = QListWidget()
+        listing.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        for message in self.hidden_messages():
+            listing.addItem(message)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        selected = buttons.addButton("Show selected", QDialogButtonBox.ActionRole)
+        every = buttons.addButton("Show all", QDialogButtonBox.ActionRole)
+
+        selected.clicked.connect(
+            lambda: (
+                self.unhide([item.text() for item in listing.selectedItems()]),
+                dialog.accept(),
+            )
+        )
+        every.clicked.connect(
+            lambda: (self.unhide(self.hidden_messages()), dialog.accept())
+        )
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(
+            QLabel("These lines are hidden from the console. Nothing was discarded.")
+        )
+        layout.addWidget(listing, 1)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    @staticmethod
+    def message_of(raw: str) -> str:
+        """The log line without its timestamp and thread prefix.
+
+        Hiding has to key on this rather than the whole line: every line carries
+        a unique timestamp, so "identical" is only meaningful once that is gone.
+        """
+        return raw.split("]: ", 1)[1].strip() if "]: " in raw else raw.strip()
+
+    def hide_like(self, raw: str) -> None:
+        """Stop showing lines whose message matches this one."""
+        message = self.message_of(raw)
+        if message:
+            self._hidden.add(message)
+            self._update_hidden_button()
+            self._rebuild()
+
+    def unhide(self, messages) -> None:
+        for message in messages:
+            self._hidden.discard(message)
+        self._update_hidden_button()
+        self._rebuild()
+
+    def hidden_messages(self) -> list[str]:
+        return sorted(self._hidden)
+
+    def _update_hidden_button(self) -> None:
+        count = len(self._hidden)
+        self.hidden_button.setText(f"Hidden ({count})" if count else "Hidden")
+        self.hidden_button.setEnabled(bool(count))
+
     def _matches(self, raw: str) -> bool:
+        if self._hidden and self.message_of(raw) in self._hidden:
+            return False
         return not self._filter or self._filter in raw.lower()
 
     def _flush(self) -> None:

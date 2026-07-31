@@ -175,11 +175,14 @@ def parse_permission_nodes(lines: list[str]) -> list[str]:
 
 
 def parse_permission_values(lines: list[str]) -> dict[str, bool]:
-    """Node -> allow/deny, harvested from a ``permission check`` reply."""
+    """Node -> allow/deny, harvested from a ``permission check`` reply.
+
+    Not filtered on ``[LP]``, for the same reason as
+    :func:`parse_inherited_permissions`: the tag only appears on the first line
+    of a wrapped message, so requiring it silently loses entries.
+    """
     values: dict[str, bool] = {}
     for line in lines:
-        if not is_luckperms_line(line):
-            continue
         for node, value in PERMISSION_VALUE.findall(clean(line)):
             values[node] = value.lower() == "true"
     return values
@@ -296,11 +299,15 @@ def parse_inherited_permissions(lines: list[str]) -> dict[str, tuple[bool, str]]
     LuckPerms reports not just the result but its origin, which is what lets the
     UI show an inherited permission greyed out and labelled with the group it
     actually comes from instead of pretending the group owns it.
+
+    Deliberately **not** filtered on the ``[LP]`` tag. LuckPerms only tags the
+    first line of a wrapped message, so gating on it dropped whichever entries
+    happened to fall past the wrap - which is why inheritance showed up for some
+    groups and not others, and why the same group could differ between refreshes.
+    The sentence this matches is distinctive enough to stand on its own.
     """
     inherited: dict[str, tuple[bool, str]] = {}
     for line in lines:
-        if not is_luckperms_line(line):
-            continue
         for node, value, parent in INHERITED_VALUE.findall(clean(line)):
             inherited[node] = (value.lower() == "true", parent)
     return inherited

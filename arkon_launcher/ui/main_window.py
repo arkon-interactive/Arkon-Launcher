@@ -133,6 +133,8 @@ class MainWindow(QMainWindow):
         self._process_sampler = serverstats.ProcessSampler()
         self._tick_sampler = serverstats.TickSampler()
         self._tps_countdown = 3
+        # Group list, cached across player selections; cleared when it changes.
+        self._group_cache: list = []
         self._tps_pending = False
         # None until we learn whether this pack has a /tps command.
         self._tps_command_works: bool | None = None
@@ -2061,23 +2063,28 @@ class MainWindow(QMainWindow):
         server = self.server
         name = player.name
 
+        cached_groups = self._group_cache
+
         def work(report):
             report(f"Reading permissions for {name}...")
-            info = luckperms.parse_user_info(server.query(luckperms.user_info(name)), name)
-            nodes = luckperms.parse_permission_nodes(
-                server.query(luckperms.user_permissions(name))
-            )
-            values: dict = {}
-            inherited: dict = {}
+            ask = lambda command: server.query(command, settle=0.25)
+
+            info = luckperms.parse_user_info(ask(luckperms.user_info(name)), name)
+            nodes = luckperms.parse_permission_nodes(ask(luckperms.user_permissions(name)))
+
             probe = nodes[0] if nodes else "minecraft.command.help"
-            reply = server.query(luckperms.check_user_permission(name, probe))
+            reply = ask(luckperms.check_user_permission(name, probe))
             values = luckperms.parse_permission_values(reply)
             inherited = luckperms.parse_inherited_permissions(reply)
-            groups = luckperms.parse_groups(server.query(luckperms.list_groups()))
+
+            # The group list barely changes and costs a round trip per player
+            # selection, so it is fetched once and reused.
+            groups = cached_groups or luckperms.parse_groups(ask(luckperms.list_groups()))
             return info, luckperms.combine_permissions(nodes, values), inherited, groups
 
         def done(payload):
             info, own, inherited, groups = payload
+            self._group_cache = groups
             detail = self.players_panel.detail
             detail.set_groups(info.groups, [g.name for g in groups], info.primary_group or "")
             detail.set_permissions(own, inherited)
@@ -2534,7 +2541,10 @@ class MainWindow(QMainWindow):
         def work(report):
             if description:
                 report(description)
-            return server.query(command)
+            # LuckPerms answers in one burst, so the default 0.6s of required
+            # quiet was pure waiting - and the permissions editor runs several
+            # of these per selection, which is what made it feel sluggish.
+            return server.query(command, settle=0.25)
 
         def done(lines):
             if on_reply is not None:

@@ -49,9 +49,6 @@ class ConfigForm(QWidget):
         # the raw key, which is right for the hundreds of mods that ship nothing.
         self._metadata: dict = {}
 
-    def set_metadata(self, metadata: dict) -> None:
-        self._metadata = metadata or {}
-
         self.heading = QLabel("")
         self.heading.setStyleSheet(f"color:{theme.TEXT_MUTED};")
         self.heading.setWordWrap(True)
@@ -69,6 +66,10 @@ class ConfigForm(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.heading)
         layout.addWidget(area, 1)
+
+    def set_metadata(self, metadata: dict) -> None:
+        """Per-key labels and bounds, when the mod ships them."""
+        self._metadata = metadata or {}
 
     # --- Population ---
 

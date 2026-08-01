@@ -11,6 +11,53 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.13.0
+
+- **Essentials abilities are now a granting tool, not a second permission
+  editor.** A responsive grid, each ability's name with a switch under it, green
+  when it applies. Permissions stay on the Permissions tab where they belong.
+  - Built on Arkon Essentials 0.34.0's schema 2 manifest, so the structure is
+    declared rather than guessed. `kind` separates the modes, the config-backed
+    values and the rest — one of those values is a boolean, so the old
+    type-based guess called it an ordinary toggle.
+  - `parent` drives what nests under what, `inheritsFrom` drives where a grant
+    flows from, and they disagree on 16 of 48 nodes. Flight's speed belongs
+    inside Flight; `admin.mode` inherits from `admin` without being shown inside
+    it. Either field alone gets the other job wrong.
+  - Modes turn each other off, matching the commands, so the panel cannot
+    express a state the server would refuse.
+  - Tooltips carry the real command. Only the seven modes have a grant command;
+    everything else says the grant goes through the permission provider rather
+    than inventing syntax for forty nodes.
+  - **Teleport tools**: player to player with a direction flip, coordinates, and
+    last death point.
+- **Fixed: adding a player to a group did nothing.** The Players tab passes the
+  player object while the Permissions tab passes a name, and the handler assumed
+  a name — so the command went out malformed and the server rejected it in
+  silence.
+- **Fixed: permission inheritance was inconsistent between groups and between
+  refreshes.** Both value parsers required LuckPerms' `[LP]` tag, but that only
+  appears on the first line of a wrapped message, so entries past the wrap were
+  dropped — and where the wrap falls depends on how long the group and node
+  names are.
+- **Fixed: tick time was always blank.** A single missed `/tps` reply disabled
+  that command for the rest of the session, and MSPT has no other source. It now
+  takes three consecutive failures.
+- **A tick rate of 0.0 on an empty server is no longer alarming.**
+  `pause-when-empty-seconds` stops the tick loop after a minute alone, so the
+  panel says "paused — no players" and explains why, rather than showing 0.0/20
+  in red.
+- **Ability changes apply in a batch.** One command per click queued a burst on
+  the server thread and timed the connection out.
+- **The console can hide repeated lines.** Right-click one to hide every copy; a
+  Hidden button lists them and puts any back. Nothing is discarded — lines that
+  arrive while hidden are still there when you unhide.
+- **The permissions editor is quicker.** LuckPerms answers in one burst, so the
+  wait per command dropped from 0.6s to 0.25s, and the group list is cached
+  across player selections instead of refetched.
+- Mod update checks report how many mods are pending across the whole pack,
+  rather than listing the versions of the two tracked on GitHub.
+
 ## 0.12.0
 
 - **Config files can be edited as a form.** Pick a config on the Mods tab and,

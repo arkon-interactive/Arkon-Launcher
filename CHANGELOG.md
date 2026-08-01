@@ -11,6 +11,20 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.14.0
+
+- **The Essentials settings tab is properly labelled.** Arkon Essentials 0.34.0
+  ships a settings manifest, so the tab now shows "Idle Timeout" rather than
+  `afkTimeoutSeconds`, grouped into the mod's own categories, with its
+  descriptions beside each field and its declared bounds on the number inputs —
+  so a value the server would reject cannot be entered.
+  - Read from the mod rather than hand-written here, for the same reason the
+    ability descriptions are: a copy goes stale the moment a setting is
+    reworded, and nothing signals when that happens.
+  - The hook lives on the generic config form, not on anything
+    Essentials-specific, so any mod that documents its settings the same way
+    gets the same treatment and the rest still fall back to the raw key.
+
 ## 0.13.0
 
 - **Essentials abilities are now a granting tool, not a second permission

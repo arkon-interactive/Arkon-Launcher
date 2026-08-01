@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import essentials
+from .. import configform, essentials
 from . import theme
 from .config_form import ConfigForm
 
@@ -45,6 +45,8 @@ class EssentialsPanel(QWidget):
         self._path: Path | None = None
         self._running = False
         self._original: dict[str, str] = {}
+        # Setting metadata from the jar: label, description, bounds, command.
+        self._meta: dict[str, essentials.Setting] = {}
 
         self.header = QLabel("")
         self.header.setWordWrap(True)
@@ -84,6 +86,9 @@ class EssentialsPanel(QWidget):
             return False
 
         self._path = Path(config_dir) / CONFIG_NAME
+        # Read the mod's own wording rather than showing raw keys. Hand-written
+        # labels go stale the moment a setting is reworded; these cannot.
+        self._meta = essentials.settings_by_key(essentials.read_settings(Path(mods_dir)))
         self.reload()
         return True
 
@@ -107,6 +112,7 @@ class EssentialsPanel(QWidget):
             self.revert_button.setEnabled(False)
             return
 
+        self.form.set_metadata(self._meta)
         if not self.form.load(self._path):
             self.header.setText(
                 f"{self._path.name} could not be read as settings. Edit it from "

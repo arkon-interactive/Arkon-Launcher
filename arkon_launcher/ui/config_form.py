@@ -44,6 +44,13 @@ class ConfigForm(QWidget):
         super().__init__(parent)
         self._document: configform.ConfigDocument | None = None
         self._dirty = False
+        # Optional per-key metadata (label, description, bounds) supplied by a
+        # mod that documents its own settings. Without it the form falls back to
+        # the raw key, which is right for the hundreds of mods that ship nothing.
+        self._metadata: dict = {}
+
+    def set_metadata(self, metadata: dict) -> None:
+        self._metadata = metadata or {}
 
         self.heading = QLabel("")
         self.heading.setStyleSheet(f"color:{theme.TEXT_MUTED};")
@@ -89,7 +96,18 @@ class ConfigForm(QWidget):
             note += f", {skipped} shown read-only because a form cannot edit them safely"
         self.heading.setText(f"{document.path.name} - {note}.")
 
-        for section, entries in document.sections().items():
+        # Metadata carries its own categories, which are written for a reader;
+        # the file's own sections are whatever the format happened to nest.
+        if self._metadata:
+            grouped: dict[str, list] = {}
+            for entry in document.entries:
+                meta = self._metadata.get(entry.label)
+                grouped.setdefault(meta.category if meta else "Other", []).append(entry)
+            sections = sorted(grouped.items())
+        else:
+            sections = list(document.sections().items())
+
+        for section, entries in sections:
             group = QGroupBox(section or "Settings")
             group_layout = QVBoxLayout(group)
             group_layout.setSpacing(2)
@@ -114,16 +132,37 @@ class ConfigForm(QWidget):
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 2, 0, 2)
 
-        label = QLabel(entry.label)
+        meta = self._metadata.get(entry.label)
+        label = QLabel(meta.label if meta else entry.label)
         label.setMinimumWidth(220)
-        if entry.description:
+        if meta:
+            label.setToolTip(meta.tooltip)
+        elif entry.description:
             label.setToolTip(entry.description)
         layout.addWidget(label)
 
         control = self._control(entry)
+        if meta:
+            control.setToolTip(meta.tooltip)
+            # Bounds the mod declares beat the widget's generic range: they stop
+            # a value the server would reject from being entered at all.
+            if isinstance(control, QSpinBox) and meta.minimum is not None:
+                control.setRange(int(meta.minimum), int(meta.maximum))
+            elif isinstance(control, QDoubleSpinBox) and meta.minimum is not None:
+                control.setRange(float(meta.minimum), float(meta.maximum))
         layout.addWidget(control, 1)
 
-        if entry.description:
+        if meta and meta.description:
+            note = QLabel(
+                meta.description
+                if len(meta.description) <= 90
+                else meta.description[:90] + "..."
+            )
+            note.setStyleSheet(f"color:{theme.TEXT_DISABLED}; font-size:11px;")
+            note.setToolTip(meta.description)
+            note.setMinimumWidth(260)
+            layout.addWidget(note)
+        elif entry.description:
             # The comment above a setting is usually its only documentation, so
             # it belongs on screen rather than hidden behind a hover.
             note = QLabel(

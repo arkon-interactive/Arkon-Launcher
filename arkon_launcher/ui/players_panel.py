@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
+from .abilities_panel import AbilitiesPanel
 from .countdown_button import CountdownButton
 
 
@@ -64,6 +65,7 @@ class PlayerDetail(QWidget):
     permission_set = Signal(object, str, bool)
     permission_unset = Signal(object, str)
     abilities_applied = Signal(object, dict)  # player, {node: on}
+    teleport_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -208,32 +210,14 @@ class PlayerDetail(QWidget):
         # Only appears when the mod ships its ability manifest; until then there
         # is nothing to bind toggles to, and guessing node names would produce
         # switches that silently do nothing.
+        self.abilities = AbilitiesPanel()
         self.abilities_box = QGroupBox("Essentials abilities")
         abilities_outer = QVBoxLayout(self.abilities_box)
-        self.abilities_hint = QLabel("")
-        self.abilities_hint.setStyleSheet(f"color:{theme.TEXT_MUTED};")
-        self.abilities_hint.setWordWrap(True)
-        abilities_outer.addWidget(self.abilities_hint)
-        self._abilities_layout = QVBoxLayout()
-        abilities_outer.addLayout(self._abilities_layout)
-
-        self.abilities_save = QPushButton("Apply changes")
-        self.abilities_save.setEnabled(False)
-        self.abilities_save.clicked.connect(self._apply_abilities)
-        self.abilities_revert = QPushButton("Discard")
-        self.abilities_revert.setEnabled(False)
-        self.abilities_revert.clicked.connect(self._discard_abilities)
-
-        abilities_buttons = QHBoxLayout()
-        abilities_buttons.addStretch(1)
-        abilities_buttons.addWidget(self.abilities_revert)
-        abilities_buttons.addWidget(self.abilities_save)
-        abilities_outer.addLayout(abilities_buttons)
-
+        abilities_outer.setContentsMargins(6, 6, 6, 6)
+        abilities_outer.addWidget(self.abilities)
+        self.abilities.applied.connect(self.abilities_applied)
+        self.abilities.teleport_requested.connect(self.teleport_requested)
         self.abilities_box.setVisible(False)
-        self._ability_boxes: dict[str, QWidget] = {}
-        self._staged: dict[str, bool] = {}
-        self._resolved_state: dict[str, bool] = {}
 
         # Fixed-height boxes must not grow. Without this, hiding the permissions
         # box (server stopped, or no LuckPerms) hands its space to Session and
@@ -363,150 +347,14 @@ class PlayerDetail(QWidget):
             self.permissions.addItem(placeholder)
 
     def set_abilities(
-        self, abilities: list, resolved: dict | None = None, live: bool = False
+        self, abilities: list, resolved: dict | None = None, live: bool = False,
+        online: list | None = None,
     ) -> None:
-        """Show every declared Essentials ability, grouped by category.
-
-        ``resolved`` is what ``/arkon perms`` said: path -> (effective, origin).
-        ``live`` says whether that reflects the running server or whether we are
-        only showing what the manifest declares. The difference is worth being
-        explicit about: a box ticked because the player is an operator and one
-        ticked because someone granted the node look identical otherwise, and
-        only the second survives them being deopped.
-        """
-        from PySide6.QtWidgets import QCheckBox
-
-        while self._abilities_layout.count():
-            item = self._abilities_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._ability_boxes.clear()
-
-        if not abilities:
-            self.abilities_box.setVisible(False)
-            return
-
-        from ..essentials import categories
-
-        resolved = resolved or {}
-        self._staged.clear()
-        self._resolved_state = {
-            a.node: bool(resolved.get(a.path, (None, ''))[0])
-            for a in abilities if not a.is_numeric
-        }
-        self.abilities_save.setEnabled(False)
-        self.abilities_revert.setEnabled(False)
-        self.abilities_save.setText('Apply changes')
-        self.abilities_save.setVisible(live)
-        self.abilities_revert.setVisible(live)
-        self.abilities_hint.setText(
-            "Ticked means the ability applies right now. Grey text is why - only "
-            "'granted' and 'denied' are set on this player; the rest is the "
-            "declared default."
-            if live else
-            "Start the server to see how these resolve for this player. Until "
-            "then these are the mod's declared defaults, not what is in force."
+        """Hand off to the abilities panel, which owns this surface now."""
+        self.abilities.set_abilities(
+            self._player, abilities, resolved or {}, live, online or []
         )
-
-        for category, entries in sorted(categories(abilities).items()):
-            group = QGroupBox(category)
-            group_layout = QVBoxLayout(group)
-            group_layout.setSpacing(4)
-
-            for ability in entries:
-                effective, origin = resolved.get(ability.path, (None, ""))
-
-                row = QHBoxLayout()
-                row.setSpacing(8)
-
-                # A node the running server does not report is not gated by a
-                # permission at all - the mod reads it from a server setting. A
-                # toggle for one would look identical to a working toggle and do
-                # nothing, so those are shown as a value with its source named.
-                config_backed = ability.is_numeric or (live and ability.path not in resolved)
-
-                if config_backed:
-                    control = QLabel(ability.label)
-                    # Indent past where a checkbox indicator would be, so every
-                    # label in the group starts in the same column.
-                    row.addSpacing(24)
-                    row.addWidget(control)
-                    row.addStretch(1)
-                    note = (
-                        f"set by {ability.config_key}"
-                        if ability.config_key else "set by the server config"
-                    )
-                else:
-                    control = QCheckBox(ability.label)
-                    control.setChecked(bool(effective))
-                    control.setEnabled(live)
-                    # Collected rather than sent: one command per click meant a
-                    # handful of quick changes queued a burst of commands on the
-                    # server thread and timed the connection out.
-                    control.toggled.connect(
-                        lambda on, node=ability.node: self._stage_ability(node, on)
-                    )
-                    row.addWidget(control)
-                    row.addStretch(1)
-                    note = origin if origin in ("granted", "denied") else ability.default_text
-
-                control.setToolTip(
-                    f"{ability.description or ability.label}\n\n{ability.node}"
-                    + (f"\nSet by: {ability.config_key}" if ability.config_key else "")
-                )
-
-                # Explicit settings are worth reading; a default is context.
-                # "denied" earns the danger colour because it is the one state
-                # someone deliberately imposed against the grain.
-                colour = {
-                    "granted": theme.TEXT_MUTED,
-                    "denied": theme.DANGER,
-                }.get(note, theme.TEXT_DISABLED)
-                caption = QLabel(note)
-                caption.setStyleSheet(f"color:{colour}; font-size:11px;")
-                row.addWidget(caption)
-
-                group_layout.addLayout(row)
-                self._ability_boxes[ability.node] = control
-
-            self._abilities_layout.addWidget(group)
-
-        self.abilities_box.setVisible(True)
-
-    def _stage_ability(self, node: str, on: bool) -> None:
-        """Remember a change without sending it yet."""
-        if self._player is None:
-            return
-        if self._resolved_state.get(node) == on:
-            self._staged.pop(node, None)  # Back to where it started.
-        else:
-            self._staged[node] = on
-        dirty = bool(self._staged)
-        self.abilities_save.setEnabled(dirty)
-        self.abilities_revert.setEnabled(dirty)
-        self.abilities_save.setText(
-            f"Apply {len(self._staged)} change(s)" if dirty else "Apply changes"
-        )
-
-    def _apply_abilities(self) -> None:
-        if self._player and self._staged:
-            self.abilities_applied.emit(self._player, dict(self._staged))
-            self._staged.clear()
-            self.abilities_save.setEnabled(False)
-            self.abilities_revert.setEnabled(False)
-            self.abilities_save.setText("Apply changes")
-
-    def _discard_abilities(self) -> None:
-        for node, was in self._resolved_state.items():
-            box = self._ability_boxes.get(node)
-            if isinstance(box, QCheckBox):
-                box.blockSignals(True)
-                box.setChecked(was)
-                box.blockSignals(False)
-        self._staged.clear()
-        self.abilities_save.setEnabled(False)
-        self.abilities_revert.setEnabled(False)
-        self.abilities_save.setText("Apply changes")
+        self.abilities_box.setVisible(bool(abilities))
 
     def set_permissions_available(self, available: bool, reason: str = "") -> None:
         self.groups_box.setVisible(available)

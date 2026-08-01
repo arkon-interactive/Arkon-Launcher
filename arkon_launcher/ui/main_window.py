@@ -900,6 +900,7 @@ class MainWindow(QMainWindow):
         detail.ban_toggled.connect(self._set_banned)
         detail.kick_requested.connect(self._kick_player)
         detail.abilities_applied.connect(self._apply_abilities)
+        detail.teleport_requested.connect(self._send_command)
         detail.group_added.connect(self._add_user_to_group)
         detail.group_removed.connect(self._remove_user_from_group)
         detail.permission_set.connect(self._set_user_permission)
@@ -1941,7 +1942,8 @@ class MainWindow(QMainWindow):
 
         # Declared defaults first, so the section is populated immediately; the
         # live resolution replaces it when the server answers.
-        detail.set_abilities(self._essentials_abilities, {}, live=False)
+        detail.set_abilities(self._essentials_abilities, {}, live=False,
+                             online=sorted(self.server.players) if self.server else [])
         self._show_ping(player)
         self._load_essentials(player)
 
@@ -2020,7 +2022,8 @@ class MainWindow(QMainWindow):
             self._show_ping(current)
             if resolved:
                 self.players_panel.detail.set_abilities(
-                    self._essentials_abilities, resolved, live=True
+                    self._essentials_abilities, resolved, live=True,
+                    online=sorted(server.players),
                 )
 
         self._run(work, done)

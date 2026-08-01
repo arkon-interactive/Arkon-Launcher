@@ -79,6 +79,43 @@ class Ability:
     type: str = "boolean"
     default_kind: str = "operator"
     config_key: str = ""
+    # --- Schema 2 ---
+    kind: str = "ability"  # ability | mode | grant | value | immunity
+    parent: str = ""  # Where this belongs in a UI.
+    inherits_from: str = ""  # Where a permission grant flows from.
+    exclusive_group: str = ""  # Modes turn each other off.
+    command: str = ""  # What a player types to use it.
+    grant_command: str = ""  # What an operator types to grant it.
+    revoke_command: str = ""
+
+    @property
+    def is_value(self) -> bool:
+        """Config-backed: a number or flag read from a setting, not a grant.
+
+        ``kind`` answers this offline, which the old type-based guess could not:
+        one of these is ``type: boolean`` and so looked like an ordinary toggle.
+        """
+        return self.kind == "value"
+
+    @property
+    def tooltip(self) -> str:
+        """Description plus whatever commands genuinely exist.
+
+        Only modes have a grant command - everything else is granted through the
+        permission provider. Inventing ``/admin grant <node>`` for the other
+        forty would be syntax the server does not accept, so absence is reported
+        as what it means rather than papered over.
+        """
+        parts = [self.description or self.label, "", self.node]
+        if self.command:
+            parts.append(f"Used with: {self.command}")
+        if self.grant_command:
+            parts.append(f"Granted with: {self.grant_command}")
+        else:
+            parts.append("Granted through the permission provider.")
+        if self.config_key:
+            parts.append(f"Set by: {self.config_key}")
+        return "\n".join(parts)
 
     @property
     def path(self) -> str:
@@ -89,8 +126,14 @@ class Ability:
         return self.node[len(prefix):] if self.node.startswith(prefix) else self.node
 
     @property
-    def parent(self) -> str:
-        """The node one level up, or "" at the top."""
+    def lexical_parent(self) -> str:
+        """The node one level up by name.
+
+        Kept only as a fallback for manifests older than schema 2. Schema 2 says
+        outright which node this nests under (``parent``) and which one a grant
+        flows from (``inheritsFrom``), and those two genuinely differ - so a name
+        is no longer the thing to reason from.
+        """
         return self.node.rsplit(".", 1)[0] if "." in self.node else ""
 
     @property
@@ -133,6 +176,23 @@ def is_installed(mods_dir: Path) -> bool:
     return find_jar(mods_dir) is not None
 
 
+def _read_manifest(mods_dir: Path, candidates) -> dict | None:
+    """First readable manifest from the jar, or None."""
+    jar = find_jar(mods_dir)
+    if jar is None:
+        return None
+    try:
+        with zipfile.ZipFile(jar) as archive:
+            names = set(archive.namelist())
+            for candidate in candidates:
+                if candidate in names:
+                    payload = json.loads(archive.read(candidate).decode("utf-8"))
+                    return payload if isinstance(payload, (dict, list)) else None
+    except (OSError, zipfile.BadZipFile, ValueError):
+        return None
+    return None
+
+
 def read_abilities(mods_dir: Path) -> list[Ability]:
     """Abilities declared by the mod. Empty when it is absent or older.
 
@@ -140,21 +200,7 @@ def read_abilities(mods_dir: Path) -> list[Ability]:
     "permissions" key, and per-entry either "node" or "permission". Versions
     before the manifest existed simply yield nothing.
     """
-    jar = find_jar(mods_dir)
-    if jar is None:
-        return []
-
-    payload = None
-    try:
-        with zipfile.ZipFile(jar) as archive:
-            names = set(archive.namelist())
-            for candidate in MANIFEST_PATHS:
-                if candidate in names:
-                    payload = json.loads(archive.read(candidate).decode("utf-8"))
-                    break
-    except (OSError, zipfile.BadZipFile, ValueError):
-        return []
-
+    payload = _read_manifest(mods_dir, MANIFEST_PATHS)
     if payload is None:
         return []
 
@@ -180,6 +226,17 @@ def read_abilities(mods_dir: Path) -> list[Ability]:
                 type=str(entry.get("type") or "boolean"),
                 default_kind=str(entry.get("default") or "operator"),
                 config_key=str(entry.get("configKey") or entry.get("config_key") or ""),
+                kind=str(entry.get("kind") or "ability"),
+                parent=str(entry.get("parent") or ""),
+                inherits_from=str(entry.get("inheritsFrom") or entry.get("inherits_from") or ""),
+                exclusive_group=str(
+                    entry.get("exclusiveGroup") or entry.get("exclusive_group") or ""
+                ),
+                command=str(entry.get("command") or ""),
+                grant_command=str(entry.get("grantCommand") or entry.get("grant_command") or ""),
+                revoke_command=str(
+                    entry.get("revokeCommand") or entry.get("revoke_command") or ""
+                ),
             )
         )
 
@@ -196,6 +253,110 @@ def categories(abilities: list[Ability]) -> dict[str, list[Ability]]:
 
 def by_path(abilities: list[Ability]) -> dict[str, Ability]:
     return {ability.path: ability for ability in abilities}
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One entry from the mod's settings manifest."""
+
+    key: str
+    label: str
+    description: str = ""
+    category: str = "General"
+    type: str = "boolean"
+    default: object = None
+    command: str = ""
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @property
+    def tooltip(self) -> str:
+        parts = [self.description or self.label, "", self.key]
+        if self.minimum is not None and self.maximum is not None:
+            parts.append(f"Range: {self.minimum} to {self.maximum}")
+        if self.default is not None:
+            parts.append(f"Default: {self.default}")
+        if self.command:
+            parts.append(f"Command: {self.command}")
+        return "\n".join(parts)
+
+
+SETTINGS_PATHS = (
+    f"assets/{MOD_ID}/settings.json",
+    f"assets/{MOD_ID}/config.json",
+)
+
+
+def read_settings(mods_dir: Path) -> list[Setting]:
+    """Setting metadata from the jar. Empty on versions that predate it.
+
+    Read from the mod rather than inferred from the config file, so the labels
+    and descriptions are the mod author's current wording - the alternative was
+    showing raw keys like ``afkTimeoutSeconds``, and hand-written copies go
+    stale the moment a setting is reworded.
+    """
+    payload = _read_manifest(mods_dir, SETTINGS_PATHS)
+    if payload is None:
+        return []
+
+    entries = payload.get("settings") or payload.get("options") or []
+    settings: list[Setting] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or entry.get("name") or "").strip()
+        if not key:
+            continue
+        settings.append(
+            Setting(
+                key=key,
+                label=str(entry.get("label") or key),
+                description=str(entry.get("description") or ""),
+                category=str(entry.get("category") or "General"),
+                type=str(entry.get("type") or "boolean"),
+                default=entry.get("default"),
+                command=str(entry.get("command") or ""),
+                minimum=entry.get("min"),
+                maximum=entry.get("max"),
+            )
+        )
+    return settings
+
+
+def settings_by_key(settings: list[Setting]) -> dict[str, Setting]:
+    return {setting.key: setting for setting in settings}
+
+
+# --- Shaping abilities for a UI ----------------------------------------------
+
+
+def children_of(abilities: list[Ability]) -> dict[str, list[Ability]]:
+    """node -> the abilities that nest under it in a UI.
+
+    Keyed on ``parent``, never on dots. The manifest keeps ``parent`` and
+    ``inheritsFrom`` apart because they genuinely disagree: ``admin.mode``
+    inherits from ``admin`` but is not shown inside it, while ``home.limit``
+    both inherits from and nests under ``home``. Deriving either from the dotted
+    name gets the other one wrong.
+    """
+    nested: dict[str, list[Ability]] = {}
+    for ability in abilities:
+        if ability.parent:
+            nested.setdefault(ability.parent, []).append(ability)
+    return nested
+
+
+def top_level(abilities: list[Ability]) -> list[Ability]:
+    return [ability for ability in abilities if not ability.parent]
+
+
+def exclusive_groups(abilities: list[Ability]) -> dict[str, list[Ability]]:
+    """Group name -> members that turn each other off."""
+    groups: dict[str, list[Ability]] = {}
+    for ability in abilities:
+        if ability.exclusive_group:
+            groups.setdefault(ability.exclusive_group, []).append(ability)
+    return groups
 
 
 def granting_parent(node: str, granted: set[str]) -> str:

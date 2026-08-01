@@ -59,7 +59,15 @@ from .. import (
 from .. import runner
 from ..runner import ServerConfig, ServerProcess, ServerState, sanitize_jvm_args
 from ..settings import AppSettings, WorldSettings
-from .. import essentials, luckperms, permissionnodes, placeholders, serversettings, serverstats
+from .. import (
+    essentials,
+    luckperms,
+    permissionnodes,
+    placeholders,
+    serverlist,
+    serversettings,
+    serverstats,
+)
 from ..serversettings import PendingChanges
 from .config_editor import ConfigEditor
 from .console_view import ConsoleView
@@ -432,6 +440,47 @@ class MainWindow(QMainWindow):
         self.console.append_notice(
             f"Applied {len(changes)} Essentials setting(s) to the running server."
         )
+
+    def join_world(self) -> None:
+        """Put the running world in the client's server list, then open CurseForge.
+
+        Not an auto-join: starting Minecraft straight into a server needs the
+        account's session token, which CurseForge holds and which this app has
+        no business handling. The two halves it can legitimately do - the list
+        entry and opening the launcher - leave one click.
+        """
+        world = self.selected_world()
+        if not (self.instance and world and self.server and self.server.is_alive):
+            return
+
+        port = self.settings.server_port or 25565
+        address = f"localhost:{port}"
+        name = world.level_name or world.folder_name
+
+        try:
+            outcome = serverlist.upsert(self.instance.directory, name, address)
+        except serverlist.ServerListError as exc:
+            QMessageBox.warning(
+                self,
+                "Could not update the server list",
+                f"{exc}\n\nYou can still join by adding {address} by hand.",
+            )
+            return
+
+        self.console.append_notice(
+            f"'{name}' {outcome} in Minecraft's server list as {address}."
+            if outcome != "unchanged"
+            else f"'{name}' is already in Minecraft's server list as {address}."
+        )
+
+        if not QDesktopServices.openUrl(QUrl("curseforge://")):
+            QMessageBox.information(
+                self,
+                "Open CurseForge yourself",
+                f"The world is in your multiplayer list as '{name}'. Start the "
+                f"instance from CurseForge and it will be waiting under "
+                f"Multiplayer.",
+            )
 
     def _fix_dependencies(self, gaps: list) -> None:
         """Switch missing dependencies back on.
@@ -859,9 +908,20 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
 
+        self.join_button = QPushButton("Join world")
+        self.join_button.setEnabled(False)
+        self.join_button.clicked.connect(self.join_world)
+        self.join_button.setToolTip(
+            "Adds this world to Minecraft's multiplayer list as localhost and "
+            "opens CurseForge, so it is waiting for you when the game starts."
+        )
+
         button_row_two = QHBoxLayout()
         button_row_two.addWidget(self.reload_button)
         button_row_two.addWidget(self.restart_button)
+
+        button_row_three = QHBoxLayout()
+        button_row_three.addWidget(self.join_button)
 
         # Pickers while stopped, health while running: you cannot change world
         # without stopping, so the pickers are dead weight once it is up.
@@ -883,6 +943,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(options_group)
         left_layout.addLayout(button_row)
         left_layout.addLayout(button_row_two)
+        left_layout.addLayout(button_row_three)
 
         self.console = ConsoleView()
         self.console.command_entered.connect(self._send_command)
@@ -1178,6 +1239,7 @@ class MainWindow(QMainWindow):
         self.restart_button.setEnabled(running)
         self.settings_panel.set_server_running(running)
         self.essentials_panel.set_running(running)
+        self.join_button.setEnabled(running)
 
         if world is not None and worlds.is_world_busy(world.folder) and not running:
             self._set_status(f"'{world.folder_name}' is open in Minecraft - close it first.")

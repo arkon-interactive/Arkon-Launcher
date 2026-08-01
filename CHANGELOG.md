@@ -11,6 +11,20 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.15.0
+
+- **A "Join world" button.** While the server is running, it adds the world to
+  Minecraft's multiplayer list as `localhost`, named after the world, and opens
+  CurseForge — so the entry is waiting under Multiplayer when the game starts.
+  Pressing it again updates the name rather than adding a second entry.
+  - **It does not auto-join, deliberately.** Launching Minecraft straight into a
+    server needs the account's session token, which CurseForge holds and which
+    this app has no business handling. It does the two halves it legitimately
+    can and leaves the sign-in and the Play button alone.
+  - `servers.dat` is plain NBT, unlike `level.dat`, and writing someone's server
+    list is destructive if it goes wrong — so existing entries keep every field
+    they had, including their icons, and the file is replaced atomically.
+
 ## 0.14.0
 
 - **The Essentials settings tab is properly labelled.** Arkon Essentials 0.34.0

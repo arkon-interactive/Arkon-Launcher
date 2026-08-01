@@ -617,6 +617,27 @@ class MainWindow(QMainWindow):
 
         self._run(work, finished)
 
+    @staticmethod
+    def _up_to_date_summary(named: list, total_current: int) -> str:
+        """Name the first-party mods, count the rest.
+
+        Listing a hundred and forty mod names would bury the console; listing
+        none reads as though nothing was checked. The Essentials suite is what
+        someone actually wants confirmed by name.
+        """
+        if not named:
+            return (
+                f"All {total_current} mods are up to date."
+                if total_current
+                else "No mods are installed, so there was nothing to check."
+            )
+
+        listed = ", ".join(f"{name} {version}" for name, version in named)
+        others = max(total_current - len(named), 0)
+        if others:
+            return f"Mods up to date: {listed} and {others} others."
+        return f"Mods up to date: {listed}."
+
     def check_mod_updates(self, announce_when_current: bool = False) -> None:
         """See whether any first-party mod in the pack has a newer release."""
         if not self.instance:
@@ -643,17 +664,19 @@ class MainWindow(QMainWindow):
 
             if not updates:
                 # Say so even when there is nothing to do. Silence here is
-                # indistinguishable from the check being broken.
+                # indistinguishable from the check being broken. The two facts
+                # are reported separately because they call for different
+                # reactions - one is reassurance, the other is a to-do.
+                total = len(modupdater.installed_jars(mods_dir))
+                if checked or announce_when_current:
+                    self.console.append_notice(
+                        self._up_to_date_summary(checked, total - pending)
+                    )
                 if pending:
                     self.console.append_notice(
                         f"{pending} mod(s) pending update. Open the Mods tab to "
-                        f"review them."
-                    )
-                elif checked or announce_when_current:
-                    total = len(modupdater.installed_jars(mods_dir))
-                    self.console.append_notice(
-                        f"All {total} mods are up to date." if total
-                        else "No mods are installed, so there was nothing to check."
+                        f"review them.",
+                        "#ffa94d",
                     )
                 self.mods_panel.set_update_status(
                     f"{pending} update(s) available" if pending else "Up to date"
@@ -908,12 +931,13 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
 
-        self.join_button = QPushButton("Join world")
+        self.join_button = QPushButton("Add to server list")
         self.join_button.setEnabled(False)
         self.join_button.clicked.connect(self.join_world)
         self.join_button.setToolTip(
             "Adds this world to Minecraft's multiplayer list as localhost and "
-            "opens CurseForge, so it is waiting for you when the game starts."
+            "opens CurseForge. It cannot join for you - that needs the account's "
+            "session token, which CurseForge holds."
         )
 
         button_row_two = QHBoxLayout()
@@ -1158,7 +1182,9 @@ class MainWindow(QMainWindow):
         self.settings.save()
         # Abilities come from a resource in the mod jar, so this works with
         # the server stopped and costs nothing when the mod is absent.
-        self._essentials_abilities = essentials.read_abilities(instance.mods_dir)
+        self._essentials_abilities = essentials.live_state(
+            essentials.read_abilities(instance.mods_dir)
+        )
 
         # The Essentials tab exists only for instances that have the mod.
         present = self.essentials_panel.set_instance(
@@ -2091,32 +2117,49 @@ class MainWindow(QMainWindow):
         self._run(work, done)
 
     def _apply_abilities(self, player, changes: dict) -> None:
-        """Send a batch of ability changes as one run of commands.
+        """Apply staged mode changes as the mod's own grant/revoke commands.
 
-        Sent from a worker with a small gap between them: these execute on the
-        server thread, and firing a dozen at once is what made the connection
-        time out when each checkbox sent its own.
+        A mode is live state, not a permission, so it is set with
+        ``/admin grant <mode> <player>`` rather than by writing a node. Turning
+        one off is a revoke, which the mod treats as "no mode" - it has no
+        per-mode off switch, because only one can be active at a time.
         """
         if not (self.server and self.server.is_alive) or not changes:
             return
 
         name = self._player_name(player)
         server = self.server
-        commands = [
-            luckperms.set_user_permission(name, node, on)
-            for node, on in sorted(changes.items())
-        ]
+        by_node = {a.node: a for a in self._essentials_abilities}
+
+        commands: list[str] = []
+        skipped: list[str] = []
+        for node, on in sorted(changes.items()):
+            ability = by_node.get(node)
+            if ability is None:
+                continue
+            template = ability.grant_command if on else ability.revoke_command
+            if not template:
+                skipped.append(ability.label)
+                continue
+            commands.append(template.lstrip("/").replace("<player>", name))
+
+        if skipped:
+            self.console.append_notice(
+                f"Not applied - Arkon Essentials has no command to set these for "
+                f"another player: {', '.join(sorted(set(skipped)))}.",
+                "#ffa94d",
+            )
+        if not commands:
+            return
 
         def work(report):
             for index, command in enumerate(commands, 1):
-                report(f"Applying ability {index} of {len(commands)} to {name}...")
+                report(f"Applying {index} of {len(commands)} to {name}...")
                 server.query(command, settle=0.2, timeout=8)
             return len(commands)
 
         def done(count):
-            self.console.append_notice(
-                f"Applied {count} ability change(s) to {name}."
-            )
+            self.console.append_notice(f"Applied {count} change(s) to {name}.")
             self._load_essentials(player)
 
         self._run(work, done)

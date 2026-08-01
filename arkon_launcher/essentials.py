@@ -350,6 +350,37 @@ def top_level(abilities: list[Ability]) -> list[Ability]:
     return [ability for ability in abilities if not ability.parent]
 
 
+POWER_CATEGORIES = {"Movement"}
+
+
+def live_state(abilities: list[Ability]) -> list[Ability]:
+    """The subset that describes what a player *is* right now, not what they may do.
+
+    The panel this feeds swaps a player's active mode and flips their powers on
+    the fly; it is not a permission editor, which is what the Permissions tab is
+    for. So the permission-shaped kinds - ``grant`` and ``immunity`` - and the
+    command gates (``home``, ``tps``, ``tp``…) are left out, and what remains is
+    the modes, the powers, and the settings hanging off them.
+    """
+    modes = {a.node for a in abilities if a.kind == "mode"}
+
+    def belongs(ability: Ability) -> bool:
+        if ability.kind in ("grant", "immunity"):
+            return False
+        if ability.kind == "mode" or ability.category in POWER_CATEGORIES:
+            return True
+        # A setting attached to a mode - Build's reach, Vanish's noclip.
+        seen, parent = set(), ability.parent
+        while parent and parent not in seen:
+            if parent in modes:
+                return True
+            seen.add(parent)
+            parent = next((a.parent for a in abilities if a.node == parent), "")
+        return False
+
+    return [a for a in abilities if belongs(a)]
+
+
 def exclusive_groups(abilities: list[Ability]) -> dict[str, list[Ability]]:
     """Group name -> members that turn each other off."""
     groups: dict[str, list[Ability]] = {}

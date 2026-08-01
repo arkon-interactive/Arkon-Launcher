@@ -53,9 +53,13 @@ class ToggleSwitch(QAbstractButton):
 
     def setChecked(self, checked: bool) -> None:  # noqa: N802 - Qt naming
         super().setChecked(checked)
-        # Jump rather than slide when set programmatically: rebuilding a panel
-        # of forty switches should not play forty animations.
-        if not self._slide.state():
+        # The knob is moved by the ``toggled`` signal, so a caller that blocks
+        # signals - which every programmatic update here does, to avoid firing
+        # change handlers - would leave the track repainted but the knob where
+        # it was. That is what drew switches green with the knob still to the
+        # left, and what stopped a deselected mode from visibly turning off.
+        if self.signalsBlocked():
+            self._slide.stop()
             self._offset = 1.0 if checked else 0.0
             self.update()
 

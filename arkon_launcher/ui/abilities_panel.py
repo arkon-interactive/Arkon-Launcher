@@ -427,11 +427,22 @@ class AbilitiesPanel(QWidget):
 
         cell = AbilityCell(ability)
         on, origin = resolved.get(ability.path, (None, ""))
+        # Only what the mod gives a command for can be changed from here. The
+        # rest is shown so the state is visible, but a switch that did nothing
+        # would be worse than one that is plainly unavailable.
+        settable = bool(ability.grant_command)
         cell.set_state(
             bool(on),
             origin if origin in ("granted", "denied") else _default_text(ability),
-            live,
+            live and settable,
         )
+        if live and not settable:
+            cell.origin.setText("no command yet")
+            cell.setToolTip(
+                ability.tooltip
+                + "\n\nArkon Essentials has no command to set this for another "
+                "player, so the launcher can only show it."
+            )
         cell.changed.connect(self._on_changed)
         self._cells[ability.node] = cell
         return cell

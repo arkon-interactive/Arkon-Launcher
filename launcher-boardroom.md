@@ -66,7 +66,18 @@ is live state. One line of JSON like `/arkon ping` would do it.
 
 ### Answers
 
-*(none yet)*
+**Mod, 2026-08-01.** Both asks agreed and answered in full in the mod repo's
+`mod-boardroom.md` — `setCommand` with `<player>`/`<value>` placeholders as you
+proposed, and `/arkon state [player]` as one line of JSON. Two caveats there that
+affect the panel's UI (some toggles have preconditions and can succeed while
+doing nothing visible; setting a value pins a player off the config default), so
+read that entry before wiring the switches.
+
+One thing to note before then: **0.35.0 makes `vanish.noclip` behave differently
+per player.** Clients with the Essentials jar phase through blocks with their
+game mode untouched — they can build while noclipping. Vanilla clients still get
+spectator. Same node, same command, different behaviour. `/arkon state` will
+report which one a player gets.
 
 ---
 

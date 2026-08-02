@@ -2132,7 +2132,13 @@ class MainWindow(QMainWindow):
 
         def work(report):
             report(f"Reading permissions for {name}...")
-            ask = lambda command: server.query(command, settle=0.25)
+
+            def ask(command):
+                try:
+                    return server.query(command, settle=0.25)
+                except RuntimeError:
+                    report("Server stopped during permissions read; aborting")
+                    return []
 
             info = luckperms.parse_user_info(ask(luckperms.user_info(name)), name)
             nodes = luckperms.parse_permission_nodes(ask(luckperms.user_permissions(name)))
@@ -2506,32 +2512,37 @@ class MainWindow(QMainWindow):
 
         def work(report):
             report("Reading LuckPerms groups and tracks...")
-            groups = luckperms.parse_groups(server.query(luckperms.list_groups()))
-            tracks = luckperms.parse_tracks(server.query(luckperms.list_tracks()))
+            try:
+                groups = luckperms.parse_groups(server.query(luckperms.list_groups()))
+                tracks = luckperms.parse_tracks(server.query(luckperms.list_tracks()))
 
-            # Reading the command tree is slow and it cannot change while the
-            # server is up, so it is fetched once per run rather than every time
-            # the tab is opened.
-            help_lines = cached_help
-            if help_lines is None:
-                report("Reading the command list...")
-                help_lines = server.query("help", settle=1.5, timeout=20)
+                # Reading the command tree is slow and it cannot change while the
+                # server is up, so it is fetched once per run rather than every time
+                # the tab is opened.
+                help_lines = cached_help
+                if help_lines is None:
+                    report("Reading the command list...")
+                    help_lines = server.query("help", settle=1.5, timeout=20)
 
-            catalogue = permissionnodes.build_catalogue(
-                help_lines, permissionnodes.load_recorded(instance_dir)
-            )
-
-            # Mods actually mirrored to the server, so the filter lists what is
-            # really loaded rather than everything in the client instance.
-            mod_ids = {
-                mod.mod_id.lower(): mod.display_name or mod.mod_id
-                for mod in (
-                    modsync.read_mod_jar(jar)
-                    for jar in sorted((server_dir / "mods").glob("*.jar"))
+                catalogue = permissionnodes.build_catalogue(
+                    help_lines, permissionnodes.load_recorded(instance_dir)
                 )
-                if mod.mod_id
-            }
-            return groups, tracks, catalogue, help_lines, mod_ids
+
+                # Mods actually mirrored to the server, so the filter lists what is
+                # really loaded rather than everything in the client instance.
+                mod_ids = {
+                    mod.mod_id.lower(): mod.display_name or mod.mod_id
+                    for mod in (
+                        modsync.read_mod_jar(jar)
+                        for jar in sorted((server_dir / "mods").glob("*.jar"))
+                    )
+                    if mod.mod_id
+                }
+                return groups, tracks, catalogue, help_lines, mod_ids
+            except RuntimeError:
+                report("Server stopped during permissions refresh; aborting")
+                # Safe defaults for the UI to display without raising.
+                return [], [], permissionnodes.NodeCatalogue(), cached_help or [], {}
 
         def done(payload):
             groups, tracks, catalogue, help_lines, mod_ids = payload
@@ -2572,7 +2583,11 @@ class MainWindow(QMainWindow):
 
         def work(report):
             report("Collecting recorded permissions...")
-            lines = server.query(luckperms.verbose_off())
+            try:
+                lines = server.query(luckperms.verbose_off())
+            except RuntimeError:
+                report("Server stopped during permission recording; aborting")
+                return []
             # Verbose output arrived on the console while recording, so the
             # captured window is the scrollback since it was switched on.
             window = server.recent_lines[start:] + lines
@@ -2609,7 +2624,11 @@ class MainWindow(QMainWindow):
             # LuckPerms answers in one burst, so the default 0.6s of required
             # quiet was pure waiting - and the permissions editor runs several
             # of these per selection, which is what made it feel sluggish.
-            return server.query(command, settle=0.25)
+            try:
+                return server.query(command, settle=0.25)
+            except RuntimeError:
+                report("Server stopped during permissions query; aborting")
+                return []
 
         def done(lines):
             if on_reply is not None:
@@ -2636,22 +2655,26 @@ class MainWindow(QMainWindow):
 
         def work(report):
             report(f"Reading permissions for {group}...")
-            nodes = luckperms.parse_permission_nodes(
-                server.query(luckperms.group_permissions(group))
-            )
-            info = server.query(luckperms.group_info(group))
-            parents = luckperms.parse_group_parents(info)
+            try:
+                nodes = luckperms.parse_permission_nodes(
+                    server.query(luckperms.group_permissions(group))
+                )
+                info = server.query(luckperms.group_info(group))
+                parents = luckperms.parse_group_parents(info)
 
-            values: dict[str, bool] = {}
-            inherited: dict[str, tuple[bool, str]] = {}
-            if nodes or parents:
-                # Any node works as the probe; the reply enumerates them all.
-                probe = nodes[0] if nodes else "minecraft.command.help"
-                reply = server.query(luckperms.check_group_permission(group, probe))
-                values = luckperms.parse_permission_values(reply)
-                inherited = luckperms.parse_inherited_permissions(reply)
+                values: dict[str, bool] = {}
+                inherited: dict[str, tuple[bool, str]] = {}
+                if nodes or parents:
+                    # Any node works as the probe; the reply enumerates them all.
+                    probe = nodes[0] if nodes else "minecraft.command.help"
+                    reply = server.query(luckperms.check_group_permission(group, probe))
+                    values = luckperms.parse_permission_values(reply)
+                    inherited = luckperms.parse_inherited_permissions(reply)
 
-            return luckperms.combine_permissions(nodes, values), inherited, parents
+                return luckperms.combine_permissions(nodes, values), inherited, parents
+            except RuntimeError:
+                report("Server stopped during group permissions read; aborting")
+                return {}, {}, []
 
         def done(payload):
             permissions, inherited, parents = payload
@@ -2705,7 +2728,11 @@ class MainWindow(QMainWindow):
             report(description)
             replies = []
             for command in commands:
-                replies.append(server.query(command))
+                try:
+                    replies.append(server.query(command))
+                except RuntimeError:
+                    report("Server stopped during batch permissions update; aborting")
+                    return replies
             return replies
 
         def done(replies):
@@ -3310,20 +3337,24 @@ class MainWindow(QMainWindow):
         use_command = self._tps_command_works is not False
 
         def work(report):
-            if use_command:
-                # Generous window: commands run on the server thread, so one
-                # coinciding with an autosave can miss a short one. Giving up
-                # after a single miss used to disable /tps - and with it MSPT,
-                # which has no other source - for the rest of the session.
-                reply = server.query("tps", settle=0.4, timeout=10)
-                tps, mspt = serverstats.parse_tps(reply)
-                if tps is not None:
-                    return tps, mspt, True
-            # No /tps in this pack - measure it from the game clock instead.
-            ticks = serverstats.parse_gametime(
-                server.query("time query gametime", settle=0.4, timeout=6)
-            )
-            return None, None, False, ticks
+            try:
+                if use_command:
+                    # Generous window: commands run on the server thread, so one
+                    # coinciding with an autosave can miss a short one. Giving up
+                    # after a single miss used to disable /tps - and with it MSPT,
+                    # which has no other source - for the rest of the session.
+                    reply = server.query("tps", settle=0.4, timeout=10)
+                    tps, mspt = serverstats.parse_tps(reply)
+                    if tps is not None:
+                        return tps, mspt, True
+                # No /tps in this pack - measure it from the game clock instead.
+                ticks = serverstats.parse_gametime(
+                    server.query("time query gametime", settle=0.4, timeout=6)
+                )
+                return None, None, False, ticks
+            except RuntimeError:
+                report("Server stopped during tps measurement; aborting")
+                return None, None, False, []
 
         def done(result):
             self._tps_pending = False

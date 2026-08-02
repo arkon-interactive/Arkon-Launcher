@@ -11,6 +11,12 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## Unreleased (2026-08-02)
+
+- Hotfixes merged (PR #4). Inno Setup installer was built and attached to v0.15.1; publish 0.15.2 installer when available.
+
+---
+
 ## 0.15.0
 
 - **A "Join world" button.** While the server is running, it adds the world to

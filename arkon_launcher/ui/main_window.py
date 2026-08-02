@@ -2123,6 +2123,11 @@ class MainWindow(QMainWindow):
         ``/admin grant <mode> <player>`` rather than by writing a node. Turning
         one off is a revoke, which the mod treats as "no mode" - it has no
         per-mode off switch, because only one can be active at a time.
+
+        After sending grant/revoke commands the launcher explicitly asks the mod
+        for the resolved permissions for that player and waits (with a timeout)
+        for the mod to report the requested state. This reconciles the UI with
+        the authoritative mod-reported state rather than relying on timing.
         """
         if not (self.server and self.server.is_alive) or not changes:
             return
@@ -2131,7 +2136,11 @@ class MainWindow(QMainWindow):
         server = self.server
         by_node = {a.node: a for a in self._essentials_abilities}
 
-        commands: list[str] = []
+        # Send grant (on) commands first, then revoke (off) commands. Some mods
+        # treat order specially; ensuring grants are applied before revokes is
+        # less surprising and tends to converge to the desired exclusive state.
+        grants: list[str] = []
+        revokes: list[str] = []
         skipped: list[str] = []
         for node, on in sorted(changes.items()):
             ability = by_node.get(node)
@@ -2141,7 +2150,11 @@ class MainWindow(QMainWindow):
             if not template:
                 skipped.append(ability.label)
                 continue
-            commands.append(template.lstrip("/").replace("<player>", name))
+            cmd = template.lstrip("/").replace("<player>", name)
+            if on:
+                grants.append(cmd)
+            else:
+                revokes.append(cmd)
 
         if skipped:
             self.console.append_notice(
@@ -2149,17 +2162,63 @@ class MainWindow(QMainWindow):
                 f"another player: {', '.join(sorted(set(skipped)))}.",
                 "#ffa94d",
             )
+
+        commands = grants + revokes
         if not commands:
             return
 
+        # The target for /arkon perms: use UUID when offline to avoid name ambiguity
+        target = name if player.is_online else (player.uuid or name)
+
         def work(report):
+            # Apply all commands, reporting progress
             for index, command in enumerate(commands, 1):
                 report(f"Applying {index} of {len(commands)} to {name}...")
-                server.query(command, settle=0.2, timeout=8)
-            return len(commands)
+                # Use query so any confirmation printed to the log is captured
+                try:
+                    server.query(command, settle=0.2, timeout=8)
+                except RuntimeError:
+                    # If the server vanished mid-run, stop trying
+                    report("Server not available while applying changes.")
+                    return False
 
-        def done(count):
-            self.console.append_notice(f"Applied {count} change(s) to {name}.")
+            # Now poll the mod's resolved perms until they match the requested
+            # changes or we timeout. This is the authoritative confirmation.
+            desired = {node: on for node, on in changes.items() if node in by_node}
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                report("Checking mod-reported state...")
+                try:
+                    reply = server.query(essentials.perms_command(target), settle=0.25, timeout=4)
+                except RuntimeError:
+                    time.sleep(0.3)
+                    continue
+                resolved = essentials.parse_perms_report(reply)
+                ok = True
+                for node, want in desired.items():
+                    if node in resolved:
+                        if resolved[node][0] != want:
+                            ok = False
+                            break
+                    else:
+                        ok = False
+                        break
+                if ok:
+                    return True
+                time.sleep(0.5)
+
+            return False
+
+        def done(confirmed):
+            if confirmed:
+                self.console.append_notice(f"Applied {len(commands)} change(s) to {name}.")
+            else:
+                self.console.append_notice(
+                    f"Applied {len(commands)} change(s) to {name}, but the mod did not report the expected state.",
+                    "#ffa94d",
+                )
+            # Refresh the live view from the mod in either case so the UI reflects
+            # the authoritative state.
             self._load_essentials(player)
 
         self._run(work, done)

@@ -124,6 +124,8 @@ class MainWindow(QMainWindow):
         self._recorded_from = 0
         self._worker: Worker | None = None
         self._workers: list[Worker] = []
+        self._backup_timer = None  # Ensure attribute exists before schedule restarts
+        self._announce_timers: list = []  # Ensure announce timers exist
         self._restarts = 0
 
         self._build_ui()
@@ -2932,7 +2934,8 @@ class MainWindow(QMainWindow):
 
     def _restart_backup_schedule(self) -> None:
         """(Re)arm the periodic backup, including its warning broadcasts."""
-        self._backup_timer.stop()
+        if getattr(self, '_backup_timer', None):
+            self._backup_timer.stop()
         for timer in self._announce_timers:
             timer.stop()
         self._announce_timers.clear()
@@ -2942,7 +2945,8 @@ class MainWindow(QMainWindow):
             return
 
         interval_ms = max(1, self.settings.backup_interval_hours) * 3600 * 1000
-        self._backup_timer.start(interval_ms)
+        if getattr(self, '_backup_timer', None):
+            self._backup_timer.start(interval_ms)
 
         if self.settings.backup_announce_enabled:
             for seconds in self.settings.backup_announcements:

@@ -169,9 +169,15 @@ def backup_running_server(
         if server is not None and server.is_alive:
             if on_progress:
                 on_progress("Flushing world to disk...")
-            server.send("save-off")
-            server.send("save-all flush")
-            paused = True
+            try:
+                server.send("save-off")
+                server.send("save-all flush")
+                paused = True
+            except RuntimeError:
+                # Server died between the check and the send; abort gracefully.
+                if on_progress:
+                    on_progress("Server stopped during backup; aborting")
+                paused = False
             import time
 
             time.sleep(3)  # Give the flush a moment to land before copying.

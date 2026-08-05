@@ -127,10 +127,12 @@ class EssentialsPanel(QWidget):
 
     def _update_hint(self) -> None:
         self.header.setText(
-            "Applied to the running server as soon as you save - Essentials "
-            "re-reads these without a restart."
+            "Sent to the running server as commands, which also apply to players "
+            "already online. The file is left alone - the server owns it while "
+            "it is up and would overwrite anything written underneath it."
             if self._running else
-            "The server is stopped. These are read when it next starts."
+            "The server is stopped, so these are written to the config file and "
+            "read when it next starts."
         )
 
     def _snapshot(self) -> dict[str, str]:
@@ -157,15 +159,28 @@ class EssentialsPanel(QWidget):
         ]
 
     def _save(self) -> None:
+        """Write the file, or send commands - never both.
+
+        A running server holds its own parsed copy of these settings and
+        rewrites the file from it, so a write underneath it is silently undone.
+        While it is up the commands are the only durable route, and they have
+        the better behaviour anyway: they apply to players already online, which
+        a file write does not.
+        """
         if self._path is None:
             return
         changes = self.changed_keys()
-        self.save_requested.emit(self._path, self.form.text())
-        if self._running and changes:
-            self.apply_live.emit(changes)
+
+        if self._running:
+            if changes:
+                self.apply_live.emit(changes)
+        else:
+            self.save_requested.emit(self._path, self.form.text())
+
         self._original = self._snapshot()
         self._on_changed()
         self.status.setText(
-            f"Saved {len(changes)} change(s)."
-            + (" Applied to the running server." if self._running and changes else "")
+            f"Applied {len(changes)} change(s) to the running server."
+            if self._running
+            else f"Saved {len(changes)} change(s)."
         )

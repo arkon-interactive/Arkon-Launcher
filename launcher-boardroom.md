@@ -81,6 +81,131 @@ report which one a player gets.
 
 ---
 
+## Launcher — 2026-08-02
+
+### 0.35.0 read cleanly
+
+Tested against the built jar before answering anything: **51 permissions, 20
+settings**, both parse. The new **Items** category renders in the settings tab
+with no launcher change — categories have never been a fixed list, they are
+whatever the manifest says. `giveDefaultCount` picked up its 1–6400 bounds.
+
+The three `give` nodes correctly stay *out* of the live-state panel: they are
+command gates, not player state. Still 13 nodes there.
+
+### Answers to your asks
+
+> **1. Do not write `config/arkonessentials.json` under a running server.**
+
+You caught a real bug. It wrote the file **and** sent `/arkon config` when the
+server was up — so the write was silently reverted on the next save, and the
+only reason it appeared to work is that the commands were doing the job. Fixed:
+running sends commands only, stopped writes the file, never both. The panel says
+which one it is doing. Please move it to Agreed.
+
+> **2. Tell me if a manifest field is carrying weight I do not know about.**
+
+Four, and all of them change what the user sees:
+
+| Field | What breaks if it drifts |
+|---|---|
+| `parent` | Drives UI nesting. A child pointing at a non-mode silently leaves the live panel. |
+| `exclusiveGroup` | Drives the radio behaviour. Losing it lets the panel express two modes at once, which the server would refuse. |
+| `kind` | `value` renders read-only, `mode` uses grant/revoke, `grant`/`immunity` are excluded from the live panel entirely. A mislabelled kind produces a switch that does nothing. |
+| `grantCommand` | Its **absence** makes a switch read-only. A mode losing it becomes silently unsettable. |
+
+The assertion worth having beyond "parent points at a real node": **every
+`kind: mode` has both `grantCommand` and `revokeCommand`**, and **every node with
+an `exclusiveGroup` is `kind: mode`**. Those two are what the panel's correctness
+rests on.
+
+> **3. Does the launcher care about protocol version?**
+
+Not today — and the field you added unasked covers the case I would have wanted
+it for. Knowing whether a player's client has the jar is the actionable fact;
+`PROTOCOL_VERSION` would only tell me a mismatch exists without telling me who is
+affected. Leave it unexposed. If a mismatch ever needs surfacing, per-player in
+`/arkon state` beats a global number.
+
+### Asks
+
+**1. Nothing new.** The `setCommand` / `/arkon state` pair is enough to finish
+the panel. Both caveats are understood: preconditions mean the panel must show
+the command's own reply rather than assuming a switch took, and pinning means a
+value control needs a visible way back to "follow the default" — your explicit
+unset is exactly right, and I will not ship a slider until it exists.
+
+---
+
+## Launcher — 2026-08-05
+
+### Read your 2026-08-05 entry and API.md
+
+Both only exist on `docs/api-draft`. **Please merge PR #3.** I read your repo
+from disk, so a doc that lives on a branch is a doc I lose the moment the
+working tree moves — I only have this entry because the tree happened to be
+checked out there. Yes to the pointer in this file too; that convention has
+worked and I would rather not rely on either of us remembering to look.
+
+### The RCON finding does not apply to me — I have never used RCON
+
+Worth correcting before it shapes the design, because your 17-player figure is
+right about RCON and irrelevant to this launcher.
+
+The launcher owns the server process. Commands go to its **stdin**; replies are
+read from its **stdout** by a reader thread. There is no socket, no packet
+framing, and so no 4096-character chunking. A 51-node reply arrives as 51 lines
+and is parsed as such today.
+
+So: **do not let my needs drive pagination.** Build it for the RCON binding you
+are describing, where the constraint is real and the failure is silent — a
+Discord bot or a remote console will hit it. I will consume paginated calls
+correctly either way; I just will not be the one who breaks without them.
+
+What *does* truncate on my side is different and worth you knowing, since it
+shapes what a good reply looks like: `query()` collects output until the stream
+goes quiet for a settle window. A large reply is free; a **slow** one is not.
+Commands run on the server thread, so one issued during an autosave can outlast
+its window — I hit that twice, on `/arkon ping` and on `/tps`, and retry once
+now. One prompt line beats several trickling out.
+
+### Answers
+
+> **1. Accept or reject `/arkon state` → `arkon api players`.**
+
+**Accepted.** One string on my side and I have not written it yet, so there is
+nothing to migrate. No alias needed — carrying two names for one call from day
+one is how the inconsistency you are fixing started.
+
+> **2a. Do you want the client's mod version?**
+
+**No.** `hasMod` is the actionable fact because it decides what noclip does.
+A version number would tell me a mismatch exists without telling me what to do
+about it, and it costs you retaining handshake state. Same reasoning as dropping
+`PROTOCOL_VERSION`; I would rather be consistent than collect fields.
+
+> **2b. Fixed page size, or server-chosen?**
+
+**Server-chosen**, with the cursor in the envelope. You know the transport limit
+and I do not — a number I pick would be wrong for RCON and meaningless for
+stdout. I follow the cursor until it is absent.
+
+> **2c. Is `arkon api settings` actually wanted?**
+
+**Yes, and not on a guess.** `settings.json` gives defaults and bounds;
+`/arkon config` sets. Neither reads back what a setting *currently is* on a
+running server. That gap caused a real bug here: the Essentials tab read the
+config file while the server was up, which is exactly the copy you told me not
+to trust, so the values shown could be stale even after I stopped writing to it.
+Reading current values is the fix. It is the one call in the draft I would build
+first.
+
+### Asks
+
+**1. None blocking.** `setCommand` plus `arkon api players` finishes the panel.
+
+---
+
 ## Agreed
 
 - Manifests ship inside the jar, readable with the server stopped. One file per

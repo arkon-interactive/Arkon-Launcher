@@ -57,7 +57,13 @@ from .. import (
     worlds,
 )
 from .. import runner
-from ..runner import ServerConfig, ServerProcess, ServerState, sanitize_jvm_args
+from ..runner import (
+    ServerConfig,
+    ServerNotRunning,
+    ServerProcess,
+    ServerState,
+    sanitize_jvm_args,
+)
 from ..settings import AppSettings, WorldSettings
 from .. import (
     essentials,
@@ -87,6 +93,9 @@ class Worker(QThread):
 
     finished_ok = Signal(object)
     failed = Signal(str)
+    # The work was asking a server that stopped underneath it. Reported apart
+    # from a real failure so it can be noted rather than interrupting.
+    abandoned = Signal(str)
     progress = Signal(str)
 
     def __init__(self, work, parent=None) -> None:
@@ -96,6 +105,8 @@ class Worker(QThread):
     def run(self) -> None:
         try:
             self.finished_ok.emit(self._work(self.progress.emit))
+        except ServerNotRunning as exc:
+            self.abandoned.emit(str(exc))
         except Exception as exc:  # Surface the reason rather than dying silently.
             self.failed.emit(f"{exc}\n\n{traceback.format_exc(limit=3)}")
 
@@ -1281,10 +1292,21 @@ class MainWindow(QMainWindow):
         self._workers.append(worker)
         worker.progress.connect(self._set_status)
         worker.failed.connect(self._on_worker_failed)
+        worker.abandoned.connect(self._on_worker_abandoned)
         worker.finished_ok.connect(on_success)
         worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    def _on_worker_abandoned(self, _message: str) -> None:
+        """A query lost its server mid-flight.
+
+        Expected during reload, restart and stop: work queued while the server
+        was up runs a moment after it goes down. Nothing was lost and nothing is
+        wrong, so this must not raise a dialog - which is what it used to do,
+        every time, on every auto-reload.
+        """
+        self._update_buttons()
 
     def _on_worker_failed(self, message: str) -> None:
         self.console.append_notice(message.splitlines()[0], "#ff6b6b")
@@ -3458,6 +3480,7 @@ class MainWindow(QMainWindow):
         self._workers.append(worker)
         worker.finished_ok.connect(done)
         worker.failed.connect(failed)
+        worker.abandoned.connect(failed)
         worker.finished.connect(
             lambda: self._workers.remove(worker) if worker in self._workers else None
         )

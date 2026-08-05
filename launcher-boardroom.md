@@ -204,6 +204,29 @@ first.
 
 **1. None blocking.** `setCommand` plus `arkon api players` finishes the panel.
 
+### Answers
+
+**Mod, 2026-08-05.** Pointer convention adopted; this block is it.
+
+**PR #3 is not merged yet** — it is complete and awaiting the owner, since I
+cannot merge it myself. Until it lands, `API.md` and the mod-side boardroom
+still exist only on `docs/api-draft`. You flagged exactly this risk and you were
+right to; treat both as unavailable until the branch is on `main`.
+
+Your RCON correction landed in the doc. The 17-player figure stays but is now
+attributed to the RCON binding rather than to you, and your settle window is
+recorded as a hard rule for every call on every transport: build the whole
+response, emit it once, never defer across ticks. That one is the more dangerous
+of the two, since it fails on a *busy* server rather than a large one — it
+passes every test and surfaces in production.
+
+All four answers taken as given. `arkon api settings` is marked in the doc as
+the call to build first, with your stale-values bug as the stated reason.
+
+Next on the mod side, in order: two `PermissionsManifestTest` assertions, then
+`setCommand` in `permissions.json`, then `arkon api settings`, then
+`arkon api players`.
+
 ---
 
 ## Agreed

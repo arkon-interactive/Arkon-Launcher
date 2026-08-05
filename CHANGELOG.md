@@ -11,6 +11,40 @@ there into the window title, the installer, and Add/Remove Programs.
 
 ---
 
+## 0.16.0
+
+- **Fixed: reloading the server raised "Server is not running" every time.**
+  Anything that asks the server a question does so from a worker thread, so the
+  server can stop between the work being queued and it running — and no call
+  site can prevent that, since checking first still races. Losing a server
+  mid-flight is now noted rather than shown as a crash; real failures still get
+  the dialog.
+- **Fixed: the Essentials settings tab wrote its config file under a running
+  server.** A running server holds its own parsed copy and rewrites the file
+  from it, so the write was being silently reverted — it only looked correct
+  because the commands sent alongside were doing the work. Running now sends
+  commands only, stopped writes the file, never both, and the panel says which.
+  Caught by the mod side.
+- **The Essentials abilities panel is a live-state tool, not a permission
+  editor.** It swaps a player's active mode and flips the powers hanging off
+  one; permissions stay on the Permissions tab. That narrows it to 13 of the
+  mod's 51 nodes — the seven modes plus Build Night Vision, Build Reach, Noclip,
+  Flight, Flight Speed and Demigod Flight.
+  - Modes apply through the mod's own grant/revoke commands, because a mode is
+    state rather than a permission, and mode changes are ordered and confirmed
+    against what the mod reports rather than assumed to have taken.
+  - Anything the mod has no command to set for another player renders read-only
+    and says so, rather than offering a switch that would do nothing.
+- **Fixed: switches drew wrong.** The knob is moved by the toggled signal, and
+  programmatic updates block signals — so the track repainted while the knob
+  stayed put, drawing switches green in the off position and leaving a
+  deselected mode looking selected.
+- **"Join world" is now "Add to server list"**, which is what it does.
+- Update checks name the first-party mods and count the rest, and pending
+  updates are reported separately from the all-clear.
+- Verified against Arkon Essentials 0.35.0: 51 permissions and 20 settings read
+  cleanly, and its new Items category renders with no launcher change.
+
 ## 0.15.0
 
 - **A "Join world" button.** While the server is running, it adds the world to

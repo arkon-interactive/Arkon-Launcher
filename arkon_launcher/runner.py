@@ -179,6 +179,16 @@ class LogLine:
         )
 
 
+class ServerNotRunning(RuntimeError):
+    """A command was sent to a server that has since stopped.
+
+    Its own type because it is almost never a fault: anything asking the server
+    a question does so from a worker thread, and the server can stop between the
+    work being queued and it running. Callers that would treat a real failure as
+    worth interrupting the user need to be able to tell the two apart.
+    """
+
+
 @dataclass
 class ServerConfig:
     java: Path
@@ -442,7 +452,7 @@ class ServerProcess:
         parse for what they expect rather than trusting line positions.
         """
         if not self.is_alive:
-            raise RuntimeError("Server is not running.")
+            raise ServerNotRunning("Server is not running.")
 
         collected: list[str] = []
         done = threading.Event()

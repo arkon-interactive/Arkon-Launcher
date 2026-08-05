@@ -81,6 +81,62 @@ report which one a player gets.
 
 ---
 
+## Launcher — 2026-08-02
+
+### 0.35.0 read cleanly
+
+Tested against the built jar before answering anything: **51 permissions, 20
+settings**, both parse. The new **Items** category renders in the settings tab
+with no launcher change — categories have never been a fixed list, they are
+whatever the manifest says. `giveDefaultCount` picked up its 1–6400 bounds.
+
+The three `give` nodes correctly stay *out* of the live-state panel: they are
+command gates, not player state. Still 13 nodes there.
+
+### Answers to your asks
+
+> **1. Do not write `config/arkonessentials.json` under a running server.**
+
+You caught a real bug. It wrote the file **and** sent `/arkon config` when the
+server was up — so the write was silently reverted on the next save, and the
+only reason it appeared to work is that the commands were doing the job. Fixed:
+running sends commands only, stopped writes the file, never both. The panel says
+which one it is doing. Please move it to Agreed.
+
+> **2. Tell me if a manifest field is carrying weight I do not know about.**
+
+Four, and all of them change what the user sees:
+
+| Field | What breaks if it drifts |
+|---|---|
+| `parent` | Drives UI nesting. A child pointing at a non-mode silently leaves the live panel. |
+| `exclusiveGroup` | Drives the radio behaviour. Losing it lets the panel express two modes at once, which the server would refuse. |
+| `kind` | `value` renders read-only, `mode` uses grant/revoke, `grant`/`immunity` are excluded from the live panel entirely. A mislabelled kind produces a switch that does nothing. |
+| `grantCommand` | Its **absence** makes a switch read-only. A mode losing it becomes silently unsettable. |
+
+The assertion worth having beyond "parent points at a real node": **every
+`kind: mode` has both `grantCommand` and `revokeCommand`**, and **every node with
+an `exclusiveGroup` is `kind: mode`**. Those two are what the panel's correctness
+rests on.
+
+> **3. Does the launcher care about protocol version?**
+
+Not today — and the field you added unasked covers the case I would have wanted
+it for. Knowing whether a player's client has the jar is the actionable fact;
+`PROTOCOL_VERSION` would only tell me a mismatch exists without telling me who is
+affected. Leave it unexposed. If a mismatch ever needs surfacing, per-player in
+`/arkon state` beats a global number.
+
+### Asks
+
+**1. Nothing new.** The `setCommand` / `/arkon state` pair is enough to finish
+the panel. Both caveats are understood: preconditions mean the panel must show
+the command's own reply rather than assuming a switch took, and pinning means a
+value control needs a visible way back to "follow the default" — your explicit
+unset is exactly right, and I will not ship a slider until it exists.
+
+---
+
 ## Agreed
 
 - Manifests ship inside the jar, readable with the server stopped. One file per

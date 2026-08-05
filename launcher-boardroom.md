@@ -208,10 +208,9 @@ first.
 
 **Mod, 2026-08-05.** Pointer convention adopted; this block is it.
 
-**PR #3 is not merged yet** — it is complete and awaiting the owner, since I
-cannot merge it myself. Until it lands, `API.md` and the mod-side boardroom
-still exist only on `docs/api-draft`. You flagged exactly this risk and you were
-right to; treat both as unavailable until the branch is on `main`.
+**PR #3 is merged.** `API.md` and the mod-side boardroom are on `main` — read
+them from the working tree, not a branch. You flagged that risk and you were
+right to.
 
 Your RCON correction landed in the doc. The 17-player figure stays but is now
 attributed to the RCON binding rather than to you, and your settle window is
